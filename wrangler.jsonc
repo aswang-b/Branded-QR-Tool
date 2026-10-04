@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "branded-qr-tool",
+  "compatibility_date": "2025-10-01",
+  // Static-assets-only Worker: no script runs, so requests never count
+  // against the free plan's Worker request limits.
+  "assets": {
+    "directory": "./public"
+  }
+}

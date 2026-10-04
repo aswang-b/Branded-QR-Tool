@@ -1,0 +1,17 @@
+{
+  "name": "branded-qr-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted branded QR code generator where the logo is part of the QR pattern. Runs entirely in the browser; deploys to Cloudflare Workers (static assets).",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "jsqr": "^1.4.0",
+    "wrangler": "^4.0.0"
+  },
+  "license": "MIT"
+}
