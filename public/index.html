@@ -121,6 +121,13 @@
       <div class="stage"><canvas id="view" width="900" height="900" aria-label="QR code preview"></canvas></div>
       <div id="status" class="status" role="status" aria-live="polite">Working&hellip;</div>
       <div id="info" class="info"></div>
+      <div class="field printsize">
+        <label for="printMm">Printed width <output id="printOut"></output></label>
+        <div class="row">
+          <input id="printMm" type="number" min="5" max="500" step="1" value="20" inputmode="numeric"> <span class="muted">mm, including the margin</span>
+          <button type="button" class="small" id="safe" title="Highest error correction, low sharpness, dark colours: matches a plain QR code's reliability in testing">Phone-safe preset</button>
+        </div>
+      </div>
       <div class="actions">
         <button type="button" class="primary" id="dlPng">Download PNG</button>
         <button type="button" id="dlSvg">Download SVG</button>

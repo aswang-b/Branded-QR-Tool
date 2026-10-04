@@ -155,6 +155,7 @@ function compute() {
     parts.push(`${Math.round((1 - s.budgetUsed) * 100)}% error margin left`);
   }
   $('info').textContent = parts.join(' · ');
+  printReadout(plan.size + 2 * style.quiet);
   setStatus('Checking scan…');
 
   setTimeout(() => {
@@ -196,6 +197,29 @@ async function autoTune() {
   compute();
 }
 
+// Module size at the chosen print width. Simulated phone scans (ZXing, WeChat, OpenCV)
+// were run down to 0.41 mm per module; below that is untested territory.
+function printReadout(totalModules) {
+  const mm = +$('printMm').value;
+  const out = $('printOut');
+  if (!(mm > 0)) { out.textContent = ''; return; }
+  const per = mm / totalModules;
+  const verdict = per >= 0.45 ? 'good' : per >= 0.4 ? 'tight' : 'too small — print larger or use a coarser grid';
+  out.textContent = `${per.toFixed(2)} mm per module · ${verdict}`;
+  out.style.color = per >= 0.4 ? '' : 'var(--bad)';
+}
+
+function phoneSafe() {
+  $('ecl').value = '3';        // High error correction
+  $('strength').value = 15;    // low sharpness: spend little of the safety margin
+  $('maxLum').value = 30;      // dark logo colours read more reliably
+  $('quiet').value = 4;        // full quiet zone
+  $('detail').value = 1;       // smallest grid that fits the link (biggest modules)
+  $('shape').value = 'dots';
+  $('dotScale').value = 90;
+  compute();
+}
+
 // ------------------------------------------------------------------ export
 
 function download(blob, name) {
@@ -225,7 +249,7 @@ function exportSvg() {
 // ------------------------------------------------------------------ wiring
 
 for (const id of ['text', 'ecl', 'imgsize', 'strength', 'fill', 'detail', 'shape', 'dotScale', 'fg', 'bg',
-  'transparent', 'keepColors', 'tintLight', 'maxLum', 'halftone', 'quiet']) {
+  'transparent', 'keepColors', 'tintLight', 'maxLum', 'halftone', 'quiet', 'printMm']) {
   $(id).addEventListener('input', () => schedule());
 }
 $('fit').addEventListener('input', () => { makeSquare(); schedule(0); });
@@ -237,6 +261,7 @@ $('clearImg').addEventListener('click', () => setSource(null, 0, 0, 'No image'))
 $('dlPng').addEventListener('click', exportPng);
 $('dlSvg').addEventListener('click', exportSvg);
 $('tune').addEventListener('click', autoTune);
+$('safe').addEventListener('click', phoneSafe);
 
 const drop = $('drop');
 drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('file').click(); } });
