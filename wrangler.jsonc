@@ -1,10 +1,23 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "branded-qr-tool",
+  "main": "src/worker.js",
   "compatibility_date": "2025-10-01",
-  // Static-assets-only Worker: no script runs, so requests never count
-  // against the free plan's Worker request limits.
   "assets": {
-    "directory": "./public"
+    "directory": "./public",
+    "binding": "ASSETS",
+    // The Worker only runs for short links and the admin API; the site itself
+    // is served straight from static assets (free, no Worker invocation).
+    "run_worker_first": ["/c/*", "/api/*"]
+  },
+  "d1_databases": [
+    // No database_id: `wrangler deploy` creates and binds the database for you.
+    { "binding": "DB", "database_name": "branded-qr-links" }
+  ],
+  "vars": {
+    // The permanent public origin that goes into printed QR codes, e.g.
+    // "https://dancewithb.fun". Leave empty to use whichever origin you
+    // create links from.
+    "PUBLIC_BASE_URL": ""
   }
 }

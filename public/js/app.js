@@ -252,4 +252,6 @@ window.addEventListener('paste', (e) => {
   if (f) loadFile(f);
 });
 
+const presetText = new URLSearchParams(location.search).get('text');
+if (presetText) $('text').value = presetText;
 useDemo();

@@ -3,8 +3,9 @@
 A self-hosted tool that makes QR codes where **your logo is part of the pattern itself**,
 not a sticker placed on top. Upload any square image, enter a link, download a PNG or SVG.
 
-- Runs 100% in the browser — images and links never leave the user's machine.
-- No backend: it deploys to **Cloudflare Workers as static assets**, which fits the free plan.
+- The QR maker runs 100% in the browser — images never leave the user's machine.
+- Deploys to **Cloudflare Workers** (free plan): the site is served as static assets, and a tiny
+  redirect Worker backs the short links (`/c/<code>`) so printed codes stay short and editable.
 - Any image the browser can decode works: PNG, JPG, WebP, GIF, SVG. Non-square images are
   cropped (or padded) to a square.
 
@@ -52,7 +53,7 @@ allowed by the spec.
 
 ```sh
 npm install
-npm test        # encoder, art layer, rendering, scan checks (uses jsQR)
+npm test        # encoder, art layer, scan checks (jsQR), and the Worker (runs wrangler dev)
 npm run dev     # serves ./public through the Workers runtime at http://localhost:8787
 ```
 
@@ -64,31 +65,55 @@ Source layout (`public/` is the whole site):
 | `js/art.js` | Image → module targets, pad-byte fitting, error-budget flipping, mask choice |
 | `js/render.js` | Shapes → SVG / Canvas / software raster |
 | `js/verify.js` | Scan test: decodes the render at several resolutions, crisp and blurred |
-| `js/app.js`, `index.html`, `css/` | The UI |
+| `js/app.js`, `index.html`, `css/` | The QR maker UI |
+| `src/worker.js` | Redirect Worker + admin API |
+| `links.html`, `js/links.js` | Short-link manager UI |
 | `vendor/jsQR.js` | [jsQR](https://github.com/cozmo/jsQR) (Apache-2.0), used only for the in-page scan test |
+
+## Short links (redirect Worker)
+
+Printed QR codes should not contain the real destination: a long URL makes a denser, harder-to-scan
+code, and you can never change it. Instead the code holds `https://yourdomain/c/<code>` and the
+Worker redirects (HTTP 302) to wherever that code currently points.
+
+- **Codes** are a counter written with `a–z` then `0–9`: `a, b, … z, 0, 1, … 9, aa, ab, … a9, ba, …`.
+  A character is added after `9`, and again after `99`. Codes are never reused, even after a delete.
+- **Managing links:** open `/links.html`, enter the admin token, create links, change a destination
+  later, delete, and see scan counts. "QR" opens the maker with the short URL filled in.
+- **API** (all need `Authorization: Bearer <ADMIN_TOKEN>`):
+  `POST /api/links {url, label?}`, `GET /api/links`, `PATCH /api/links/<code> {url?, label?}`,
+  `DELETE /api/links/<code>`. Only `http(s)` destinations are accepted, so the endpoint can't be
+  used for `javascript:` links. Without `ADMIN_TOKEN` set, the API refuses everything.
+- **Storage** is one D1 table, created automatically on first use. Each scan costs one read and one
+  write; the free plan allows on the order of 100k writes/day (check Cloudflare's current limits).
 
 ## Deploy to Cloudflare (free)
 
-`wrangler.jsonc` configures an assets-only Worker: there is no Worker script, so nothing runs
-per request, and static asset requests are free and unlimited on the Workers free plan.
-
-**Option A — CLI**
+`wrangler.jsonc` runs the Worker only for `/c/*` and `/api/*`; everything else is served from
+static assets without invoking the Worker.
 
 ```sh
 npm install
 npx wrangler login
-npm run deploy      # publishes to https://branded-qr-tool.<your-subdomain>.workers.dev
+npm run deploy                       # also creates the D1 database and binds it as DB
+npx wrangler secret put ADMIN_TOKEN  # choose a long random string; it's your login for /links.html
 ```
 
-**Option B — Git integration**
+Then:
 
-In the Cloudflare dashboard: *Workers & Pages → Create → Import a repository*, pick this repo.
-Leave the build command empty; the deploy command is `npx wrangler deploy`. Every push to the
-production branch redeploys.
+1. **Use your own domain.** In the Cloudflare dashboard, open the Worker → *Settings → Domains &
+   Routes → Add → Custom domain* (the domain's DNS must be on Cloudflare). Printed codes should
+   use this permanent domain, not `*.workers.dev`.
+2. **Pin the domain into QR codes.** Set `PUBLIC_BASE_URL` in `wrangler.jsonc` to e.g.
+   `"https://dancewithb.fun"` and redeploy. Short links are then always reported with that origin,
+   even if you manage them from another address.
+3. Open `https://yourdomain/links.html`, sign in, create a link, and click **QR**.
 
-To use your own domain (e.g. `qr.yoursite.com`), add a custom domain to the Worker under
-*Settings → Domains & Routes*. Change `name` in `wrangler.jsonc` if you want a different
-`workers.dev` subdomain.
+*Git integration* works too: *Workers & Pages → Create → Import a repository*, empty build command,
+deploy command `npx wrangler deploy`; set `ADMIN_TOKEN` under *Settings → Variables and Secrets*.
+
+For local development create `.dev.vars` containing `ADMIN_TOKEN=anything` and run `npm run dev`
+(local D1 is simulated; nothing touches production).
 
 ## Limitations
 

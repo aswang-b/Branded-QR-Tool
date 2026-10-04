@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Short links</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e8365d'/%3E%3Cpath d='M7 7h7v7H7zM18 7h7v7h-7zM7 18h7v7H7zM18 18h3v3h-3zM22 22h3v3h-3z' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Short links</h1>
+    <p>Printed QR codes point at <code>/c/&lt;code&gt;</code>. You can change where a code goes at any time without reprinting. <a href="index.html">&larr; QR maker</a></p>
+  </header>
+
+  <main class="stack">
+    <section class="panel" aria-label="Sign in">
+      <div class="field">
+        <label for="token">Admin token</label>
+        <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
+        <label class="check"><input id="remember" type="checkbox"> Remember on this device</label>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="Create">
+      <h2>New short link</h2>
+      <div class="field">
+        <label for="dest">Destination</label>
+        <input id="dest" type="text" placeholder="https://dancewithb.fun/check-in" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="label">Label <span class="muted">(optional, for your reference)</span></label>
+        <input id="label" type="text" maxlength="100" placeholder="Class check-in">
+      </div>
+      <button type="button" class="primary" id="create">Create</button>
+      <div id="created" class="created" hidden></div>
+    </section>
+
+    <section class="panel" aria-label="Links">
+      <div class="row between"><h2>All links</h2><button type="button" class="small" id="refresh">Refresh</button></div>
+      <p id="msg" class="status" role="status" aria-live="polite"></p>
+      <div class="table-wrap">
+        <table id="table" hidden>
+          <thead><tr><th>Code</th><th>Destination</th><th>Hits</th><th>Created</th><th></th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="js/links.js"></script>
+</body>
+</html>
