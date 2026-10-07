@@ -108,3 +108,77 @@ td.dest { word-break: break-all; }
 .created { margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); }
 a { color: var(--accent); }
 .hint a { color: var(--accent); }
+
+/* navigation */
+.nav { display: flex; gap: 16px; margin-bottom: 10px; font-size: .9rem; }
+.nav a { color: var(--muted); text-decoration: none; padding-bottom: 2px; }
+.nav a[aria-current="page"] { color: var(--text); border-bottom: 2px solid var(--accent); }
+.nav a:hover { color: var(--text); }
+
+/* generator layout */
+@media (min-width: 900px) {
+  .layout { grid-template-columns: 360px minmax(0, 1fr); }
+  .controls { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
+}
+.top, .layout { max-width: 1280px; }
+.row.nowrap { flex-wrap: nowrap; }
+select.inline { width: auto; padding: 5px 8px; font-size: .85rem; }
+button.wide { width: 100%; margin-top: 8px; padding: 12px; }
+button:disabled { opacity: .6; cursor: progress; }
+textarea {
+  width: 100%; padding: 9px 10px; font: inherit; color: var(--text); resize: vertical;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+}
+input[type="number"], input[type="password"] {
+  width: 100%; padding: 9px 10px; font: inherit; color: var(--text);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+}
+.warn-text { color: var(--warn); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.small { font-size: .78rem; }
+.progress { height: 6px; border-radius: 3px; background: var(--line); margin-top: 10px; overflow: hidden; }
+.progress div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+
+.results { display: grid; gap: 16px; min-width: 0; }
+.empty { color: var(--muted); }
+.set h2 { margin: 4px 0 10px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.card {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px; text-align: left;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; cursor: pointer;
+}
+.card:hover { border-color: var(--muted); }
+.card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+.card canvas { width: 100%; height: auto; aspect-ratio: 1; border-radius: 8px; display: block; }
+.card-meta { display: grid; gap: 2px; font-size: .82rem; }
+.kv { display: flex; justify-content: space-between; gap: 6px; }
+.kv span { color: var(--muted); }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.bad { color: var(--bad); }
+.tag {
+  justify-self: start; font-size: .72rem; font-weight: 700; padding: 1px 7px; border-radius: 99px;
+  background: var(--accent); color: var(--accent-ink); margin-bottom: 2px;
+}
+
+.detail-grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
+@media (min-width: 1100px) { .detail-grid { grid-template-columns: minmax(0, 420px) minmax(0, 1fr); } }
+.detail h2 { margin-top: 0; }
+.detail h3 { margin: 14px 0 8px; font-size: .95rem; }
+.metrics { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0 0 12px; font-size: .88rem; }
+.metrics dt { color: var(--muted); }
+.metrics dd { margin: 0; }
+.sizes { font-size: .8rem; margin-bottom: 8px; }
+.sizes th, .sizes td { padding: 4px 6px; text-align: center; }
+.sizes th:first-child { text-align: left; color: var(--muted); font-weight: 500; }
+.save { display: grid; gap: 8px; border-top: 1px solid var(--line); margin-top: 8px; }
+
+/* saved codes */
+.wide-stack { max-width: 1100px; }
+.saved-grid { display: grid; gap: 16px; }
+.saved { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 600px) { .saved { grid-template-columns: 1fr; } }
+.saved-img { width: 100%; height: auto; aspect-ratio: 1; border-radius: 8px; background:
+  repeating-conic-gradient(var(--line) 0% 25%, transparent 0% 50%) 50% / 12px 12px; }
+.saved-info h2 { margin: 0 0 4px; }
+.saved-details { margin: 0 0 10px; white-space: pre-wrap; }

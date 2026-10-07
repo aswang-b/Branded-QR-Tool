@@ -4,26 +4,30 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Branded QR</title>
-  <meta name="description" content="Make a QR code with your logo built into the pattern. Runs entirely in your browser.">
+  <meta name="description" content="Make QR codes with your logo built into the pattern, scored for real-world scan reliability.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e8365d'/%3E%3Cpath d='M7 7h7v7H7zM18 7h7v7h-7zM7 18h7v7H7zM18 18h3v3h-3zM22 22h3v3h-3z' fill='%23fff'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
   <header class="top">
+    <nav class="nav"><a href="index.html" aria-current="page">Make</a><a href="links.html">Short links</a><a href="saved.html">Saved codes</a></nav>
     <h1>Branded QR</h1>
-    <p>Your logo, built into the QR pattern itself. Everything runs in your browser &mdash; images are never uploaded.</p>
+    <p>Your logo, built into the QR pattern itself. Every design is scored with a simulated phone camera before you pick one.</p>
   </header>
 
   <main class="layout">
     <section class="panel controls" aria-label="Settings">
       <div class="field">
-        <label for="text">Link or text</label>
-        <input id="text" type="text" value="https://example.com" autocomplete="off" spellcheck="false">
-        <p class="hint">Shorter links give a bigger, clearer logo. <a href="links.html">Create a short redirect link</a> (lets you change the destination later).</p>
+        <label for="text">Link</label>
+        <div class="row nowrap">
+          <input id="text" type="text" value="https://example.com" autocomplete="off" spellcheck="false">
+          <button type="button" class="small" id="shorten" title="Create a /c/ short link for this destination">Shorten</button>
+        </div>
+        <p class="hint" id="textHint">Web links get a <code>#…</code> ending that draws the logo; servers never see it. A <a href="links.html">short link</a> lets you change the destination after printing.</p>
       </div>
 
       <div class="field">
-        <label for="file">Image <span class="muted">(any square image: PNG, JPG, SVG, WebP&hellip;)</span></label>
+        <label for="file">Image <span class="muted">(square works best: PNG, JPG, SVG, WebP…)</span></label>
         <div id="drop" class="drop" tabindex="0">
           <img id="thumb" alt="" width="56" height="56">
           <div class="drop-text">
@@ -35,62 +39,61 @@
         <div class="row">
           <button type="button" class="small" id="useDemo">Use demo</button>
           <button type="button" class="small" id="clearImg">No image</button>
+          <select id="fit" class="inline" aria-label="If the image is not square">
+            <option value="crop">Crop to square</option>
+            <option value="pad">Pad to square</option>
+          </select>
         </div>
       </div>
 
       <div class="grid2">
         <div class="field">
-          <label for="fit">If not square</label>
-          <select id="fit">
-            <option value="crop">Crop to square</option>
-            <option value="pad">Pad to square</option>
-          </select>
+          <label for="printMm">Print width <span class="muted">mm</span></label>
+          <input id="printMm" type="number" min="10" max="1000" step="1" value="25" inputmode="numeric">
         </div>
         <div class="field">
-          <label for="ecl">Error correction</label>
-          <select id="ecl">
-            <option value="0">Low (sharpest)</option>
-            <option value="1" selected>Medium</option>
-            <option value="2">Quartile</option>
-            <option value="3">High (robust)</option>
+          <label for="distance">Scanned from</label>
+          <select id="distance">
+            <option value="100">10 cm (close)</option>
+            <option value="150" selected>15 cm (typical)</option>
+            <option value="250">25 cm</option>
+            <option value="400">40 cm (arm's length)</option>
+            <option value="1000">1 m (poster)</option>
           </select>
         </div>
       </div>
 
-      <div class="field">
-        <label for="imgsize">Image size <output id="imgsizeOut">100%</output></label>
-        <input id="imgsize" type="range" min="30" max="100" value="100">
-      </div>
-      <div class="field">
-        <label for="strength">Logo sharpness <output id="strengthOut">60%</output></label>
-        <input id="strength" type="range" min="0" max="85" value="60">
-        <p class="hint">Higher = crisper logo, less scan safety margin.</p>
-      </div>
-      <div class="field">
-        <label for="fill">Logo fill <output id="fillOut">65</output></label>
-        <input id="fill" type="range" min="30" max="90" value="65">
-        <p class="hint">Raise to make mid-tone colours solid; lower to leave them sparse.</p>
-      </div>
-      <div class="field">
-        <label for="detail">Grid detail <output id="detailOut"></output></label>
-        <input id="detail" type="range" min="1" max="20" value="10">
-        <p class="hint">Finer grid = more logo detail, but needs a bigger print size.</p>
-      </div>
-
-      <details>
-        <summary>Style &amp; colours</summary>
+      <details open>
+        <summary>Style</summary>
         <div class="grid2">
           <div class="field">
-            <label for="shape">Module shape</label>
+            <label for="shape">Pixel shape</label>
             <select id="shape">
               <option value="dots">Dots</option>
               <option value="rounded">Rounded squares</option>
               <option value="squares">Squares</option>
+              <option value="connected">Connected</option>
             </select>
           </div>
           <div class="field">
-            <label for="dotScale">Module size <output id="dotScaleOut">90%</output></label>
-            <input id="dotScale" type="range" min="50" max="100" value="90">
+            <label for="eyes">Corner eyes</label>
+            <select id="eyes">
+              <option value="square">Square</option>
+              <option value="rounded">Rounded</option>
+              <option value="dot">Round dot</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="contrast">Contrast</label>
+            <select id="contrast">
+              <option value="0.32">High (most readable)</option>
+              <option value="0.4" selected>Standard</option>
+              <option value="0.47">Vivid colours</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="dotScale">Pixel size <output id="dotScaleOut">90%</output></label>
+            <input id="dotScale" type="range" min="70" max="100" value="90">
           </div>
           <div class="field">
             <label for="fg">Dark colour</label>
@@ -98,51 +101,72 @@
           </div>
           <div class="field">
             <label for="bg">Background</label>
-            <div class="row"><input id="bg" type="color" value="#ffffff">
-              <label class="check"><input id="transparent" type="checkbox"> transparent</label></div>
+            <input id="bg" type="color" value="#ffffff">
           </div>
         </div>
-        <label class="check"><input id="keepColors" type="checkbox" checked> Use the image&rsquo;s colours</label>
-        <label class="check"><input id="tintLight" type="checkbox"> Tint light modules too</label>
+        <p id="colorWarn" class="hint warn-text" hidden></p>
+      </details>
+
+      <details>
+        <summary>Logo placement</summary>
         <div class="field">
-          <label for="maxLum">Colour brightness limit <output id="maxLumOut">45%</output></label>
-          <input id="maxLum" type="range" min="25" max="65" value="45">
-          <p class="hint">Brighter colours look better but scan worse.</p>
+          <label for="imgsize">Image size <output id="imgsizeOut">100%</output></label>
+          <input id="imgsize" type="range" min="30" max="100" value="100">
         </div>
-        <label class="check"><input id="halftone" type="checkbox"> Photo mode (dither shades into dots)</label>
         <div class="field">
-          <label for="quiet">Margin <output id="quietOut">4</output></label>
-          <input id="quiet" type="range" min="0" max="8" value="4">
+          <label for="fill">Logo fill <output id="fillOut">65</output></label>
+          <input id="fill" type="range" min="30" max="90" value="65">
+          <p class="hint">Raise to make mid-tone colours solid; lower to leave them sparse.</p>
+        </div>
+        <label class="check"><input id="tintLight" type="checkbox"> Tint light pixels inside the logo (colour set)</label>
+        <div class="field">
+          <label for="quiet">Margin <output id="quietOut">4</output> <span class="muted">modules</span></label>
+          <input id="quiet" type="range" min="2" max="6" value="4">
         </div>
       </details>
+
+      <button type="button" class="primary wide" id="generate">Generate designs</button>
+      <div class="progress" id="progressWrap" hidden><div id="progressBar"></div></div>
+      <p class="hint" id="decoderNote"></p>
     </section>
 
-    <section class="panel preview" aria-label="Preview">
-      <div class="stage"><canvas id="view" width="900" height="900" aria-label="QR code preview"></canvas></div>
-      <div id="status" class="status" role="status" aria-live="polite">Working&hellip;</div>
-      <div id="info" class="info"></div>
-      <div class="field printsize">
-        <label for="printMm">Printed width <output id="printOut"></output></label>
-        <div class="row">
-          <input id="printMm" type="number" min="5" max="500" step="1" value="20" inputmode="numeric"> <span class="muted">mm, including the margin</span>
-          <button type="button" class="small" id="safe" title="Highest error correction, low sharpness, dark colours: matches a plain QR code's reliability in testing">Phone-safe preset</button>
+    <section class="results" aria-label="Designs">
+      <div class="panel detail" id="detail" hidden>
+        <div class="detail-grid">
+          <div class="stage"><canvas id="view" width="900" height="900" aria-label="Selected QR code"></canvas></div>
+          <div class="detail-info">
+            <h2 id="detailTitle"></h2>
+            <dl class="metrics" id="detailMetrics"></dl>
+            <table class="sizes" id="sizeTable" aria-label="Expected scan rate by print width"></table>
+            <p class="hint mono" id="detailText"></p>
+            <div class="actions">
+              <button type="button" class="primary" id="dlPng">Download PNG</button>
+              <button type="button" id="dlSvg">Download SVG</button>
+              <select id="pngSize" class="inline" aria-label="PNG size">
+                <option value="1024">1024 px</option>
+                <option value="2048" selected>2048 px</option>
+                <option value="4096">4096 px</option>
+              </select>
+            </div>
+            <form id="saveForm" class="save">
+              <h3>Save this code</h3>
+              <input id="saveName" type="text" maxlength="100" placeholder="Name, e.g. Class check-in sticker" required>
+              <textarea id="saveDetails" maxlength="2000" rows="2" placeholder="Details (optional): where it's used, print size…"></textarea>
+              <input id="saveToken" type="password" autocomplete="off" placeholder="Admin token" hidden>
+              <div class="row"><button type="submit" class="primary">Save</button><span id="saveMsg" class="hint"></span></div>
+            </form>
+          </div>
         </div>
       </div>
-      <div class="actions">
-        <button type="button" class="primary" id="dlPng">Download PNG</button>
-        <button type="button" id="dlSvg">Download SVG</button>
-        <select id="pngSize" aria-label="PNG size">
-          <option value="1024">1024 px</option>
-          <option value="2048" selected>2048 px</option>
-          <option value="4096">4096 px</option>
-        </select>
-        <button type="button" id="tune" title="Find the sharpest logo that still passes the scan test">Auto-tune</button>
+
+      <div id="empty" class="panel empty">
+        <p>Set your link and image, then <strong>Generate designs</strong>. You'll get up to 16 candidates — a colour set and a black &amp; white set — each scored for scan reliability, minimum print size and logo match.</p>
       </div>
-      <p class="hint">Always test the final code with your phone before printing.</p>
+      <section id="setColor" class="set" hidden><h2>Colour</h2><div class="cards" id="cardsColor"></div></section>
+      <section id="setBw" class="set" hidden><h2>Black &amp; white</h2><div class="cards" id="cardsBw"></div></section>
     </section>
   </main>
 
-  <script src="vendor/jsQR.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

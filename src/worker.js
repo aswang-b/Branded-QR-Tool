@@ -5,6 +5,11 @@
 //   GET  /api/links           list                               (admin)
 //   PATCH /api/links/<code>   update   {url?, label?}            (admin)
 //   DELETE /api/links/<code>  delete                             (admin)
+//   POST /api/designs         save a generated QR design          (admin)
+//   GET  /api/designs         list saved designs (no SVG)          (admin)
+//   GET  /api/designs/<id>    one design, with its SVG             (admin)
+//   PATCH /api/designs/<id>   rename / edit details                (admin)
+//   DELETE /api/designs/<id>  delete                               (admin)
 //
 // Everything else is served from the static assets (see wrangler.jsonc: the
 // Worker only runs for /c/* and /api/*, so the site itself stays free of
@@ -22,6 +27,12 @@ const MAX_CODE_LENGTH = 9; // 36^9 < 2^53, so ids stay exact
 const MAX_URL_LENGTH = 2048;
 const MAX_LABEL_LENGTH = 100;
 const MAX_BODY_BYTES = 8 * 1024;
+const MAX_DESIGN_BODY_BYTES = 1_600_000; // D1 rows top out around 2 MB
+const MAX_SVG_LENGTH = 1_500_000;
+const MAX_NAME_LENGTH = 100;
+const MAX_DETAILS_LENGTH = 2000;
+const MAX_TEXT_LENGTH = 4296; // largest QR payload
+const MAX_META_LENGTH = 16 * 1024;
 
 // ---------------------------------------------------------------- codes
 
@@ -81,11 +92,11 @@ async function requireAdmin(request, env) {
   return null;
 }
 
-async function readJson(request) {
+async function readJson(request, maxBytes = MAX_BODY_BYTES) {
   const len = Number(request.headers.get('Content-Length') || 0);
-  if (len > MAX_BODY_BYTES) throw new HttpError(413, 'Request body too large');
+  if (len > maxBytes) throw new HttpError(413, 'Request body too large');
   const text = await request.text();
-  if (text.length > MAX_BODY_BYTES) throw new HttpError(413, 'Request body too large');
+  if (text.length > maxBytes) throw new HttpError(413, 'Request body too large');
   try {
     const body = JSON.parse(text || '{}');
     if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new Error();
@@ -123,23 +134,71 @@ function parseLabel(value) {
   return value.trim();
 }
 
+function parseText(value, field, max, { required = true } = {}) {
+  if (value === undefined && !required) return '';
+  if (typeof value !== 'string') throw new HttpError(400, `"${field}" must be a string`);
+  const v = value.trim();
+  if ((required && !v) || v.length > max) throw new HttpError(400, `"${field}" must be ${required ? '1' : '0'}-${max} characters`);
+  return v;
+}
+
+/** Saved SVGs come from our own renderer; refuse anything that could carry script. */
+function parseSvg(value) {
+  if (typeof value !== 'string' || value.length > MAX_SVG_LENGTH) throw new HttpError(400, `"svg" must be a string of at most ${MAX_SVG_LENGTH} characters`);
+  const v = value.trim();
+  if (!/^<svg[\s>]/i.test(v) || !/<\/svg>$/i.test(v)) throw new HttpError(400, '"svg" must be a single <svg> document');
+  if (/<script|<foreignObject|\son[a-z]+\s*=|javascript:|<!ENTITY|xlink:href|\shref\s*=/i.test(v)) throw new HttpError(400, '"svg" contains disallowed content');
+  return v;
+}
+
+function parseMeta(value) {
+  if (value === undefined) return '{}';
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new HttpError(400, '"meta" must be an object');
+  const v = JSON.stringify(value);
+  if (v.length > MAX_META_LENGTH) throw new HttpError(400, '"meta" is too large');
+  return v;
+}
+
+/** If the encoded text is one of our short links (fragment allowed), its id. */
+function linkIdFor(text, request, env) {
+  let u;
+  try { u = new URL(text); } catch { return null; }
+  const hosts = new Set([new URL(request.url).host]);
+  if (env.PUBLIC_BASE_URL) { try { hosts.add(new URL(env.PUBLIC_BASE_URL).host); } catch { /* ignore */ } }
+  const m = /^\/c\/([A-Za-z0-9]+)\/?$/.exec(u.pathname);
+  return m && hosts.has(u.host) ? decodeCode(m[1].toLowerCase()) : null;
+}
+
 // ---------------------------------------------------------------- storage
 
 let schemaReady = null;
-/** Creates the table on first use, so deploying needs no separate migration step. */
+/** Creates the tables on first use, so deploying needs no separate migration step. */
 function ensureSchema(db) {
   schemaReady ??= db
-    .prepare(
-      `CREATE TABLE IF NOT EXISTS links (
-         id INTEGER PRIMARY KEY AUTOINCREMENT,
-         url TEXT NOT NULL,
-         label TEXT NOT NULL DEFAULT '',
-         created_at INTEGER NOT NULL,
-         hits INTEGER NOT NULL DEFAULT 0,
-         last_hit INTEGER
-       )`,
-    )
-    .run()
+    .batch([
+      db.prepare(
+        `CREATE TABLE IF NOT EXISTS links (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           url TEXT NOT NULL,
+           label TEXT NOT NULL DEFAULT '',
+           created_at INTEGER NOT NULL,
+           hits INTEGER NOT NULL DEFAULT 0,
+           last_hit INTEGER
+         )`,
+      ),
+      db.prepare(
+        `CREATE TABLE IF NOT EXISTS designs (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           name TEXT NOT NULL,
+           details TEXT NOT NULL DEFAULT '',
+           text TEXT NOT NULL,
+           link_id INTEGER,
+           svg TEXT NOT NULL,
+           meta TEXT NOT NULL DEFAULT '{}',
+           created_at INTEGER NOT NULL
+         )`,
+      ),
+    ])
     .catch((e) => {
       schemaReady = null;
       throw e;
@@ -164,6 +223,22 @@ function present(row, base) {
   };
 }
 
+function presentDesign(row, base, { withSvg = false } = {}) {
+  let meta = {};
+  try { meta = JSON.parse(row.meta || '{}'); } catch { /* keep {} */ }
+  const out = {
+    id: row.id,
+    name: row.name,
+    details: row.details,
+    text: row.text,
+    link: row.link_id ? { code: encodeId(row.link_id), short: `${base}/c/${encodeId(row.link_id)}`, url: row.link_url ?? null } : null,
+    meta,
+    created_at: row.created_at,
+  };
+  if (withSvg) out.svg = row.svg;
+  return out;
+}
+
 // ---------------------------------------------------------------- routes
 
 async function redirect(request, env, ctx, rawCode) {
@@ -181,11 +256,67 @@ async function redirect(request, env, ctx, rawCode) {
         .catch((e) => console.error('hit counter failed', e)),
     );
   }
-  // 302 (not 301): destinations can be edited later, so browsers must not cache it
+  // 302 (not 301): destinations can be edited later, so browsers must not cache it.
+  // Browsers copy the request's #fragment onto a redirect target that has none;
+  // QR codes use the fragment to shape their pattern, so give the target an
+  // explicit (empty) fragment to stop that junk reaching the destination page.
+  const location = row.url.includes('#') ? row.url : `${row.url}#`;
   return new Response(null, {
     status: 302,
-    headers: { Location: row.url, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' },
+    headers: { Location: location, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' },
   });
+}
+
+async function designsApi(request, env, url, base, rawId) {
+  const db = env.DB;
+  const select = `SELECT d.id, d.name, d.details, d.text, d.link_id, d.meta, d.created_at, l.url AS link_url %SVG%
+                  FROM designs d LEFT JOIN links l ON l.id = d.link_id`;
+  if (rawId === undefined) {
+    if (request.method === 'POST') {
+      const body = await readJson(request, MAX_DESIGN_BODY_BYTES);
+      const name = parseText(body.name, 'name', MAX_NAME_LENGTH);
+      const details = parseText(body.details, 'details', MAX_DETAILS_LENGTH, { required: false });
+      const text = parseText(body.text, 'text', MAX_TEXT_LENGTH);
+      const svg = parseSvg(body.svg);
+      const meta = parseMeta(body.meta);
+      const { id } = await db.prepare('INSERT INTO designs (name, details, text, link_id, svg, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id')
+        .bind(name, details, text, linkIdFor(text, request, env), svg, meta, Math.floor(Date.now() / 1000))
+        .first();
+      const row = await db.prepare(`${select.replace('%SVG%', '')} WHERE d.id = ?`).bind(id).first();
+      return json(presentDesign(row, base), 201);
+    }
+    if (request.method === 'GET') {
+      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+      const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+      const { results } = await db.prepare(`${select.replace('%SVG%', '')} ORDER BY d.id DESC LIMIT ? OFFSET ?`).bind(limit, offset).all();
+      return json({ designs: results.map((r) => presentDesign(r, base)) });
+    }
+    return json({ error: 'Method not allowed' }, 405, { Allow: 'GET, POST' });
+  }
+
+  const id = /^[1-9][0-9]{0,15}$/.test(rawId) ? Number(rawId) : null;
+  if (!id) return json({ error: 'Not found' }, 404);
+  if (request.method === 'GET') {
+    const row = await db.prepare(`${select.replace('%SVG%', ', d.svg')} WHERE d.id = ?`).bind(id).first();
+    return row ? json(presentDesign(row, base, { withSvg: true })) : json({ error: 'Not found' }, 404);
+  }
+  if (request.method === 'PATCH') {
+    const body = await readJson(request);
+    const sets = [];
+    const args = [];
+    if (body.name !== undefined) { sets.push('name = ?'); args.push(parseText(body.name, 'name', MAX_NAME_LENGTH)); }
+    if (body.details !== undefined) { sets.push('details = ?'); args.push(parseText(body.details, 'details', MAX_DETAILS_LENGTH, { required: false })); }
+    if (!sets.length) throw new HttpError(400, 'Nothing to update: send "name" and/or "details"');
+    const res = await db.prepare(`UPDATE designs SET ${sets.join(', ')} WHERE id = ?`).bind(...args, id).run();
+    if (!res.meta?.changes) return json({ error: 'Not found' }, 404);
+    const row = await db.prepare(`${select.replace('%SVG%', '')} WHERE d.id = ?`).bind(id).first();
+    return json(presentDesign(row, base));
+  }
+  if (request.method === 'DELETE') {
+    const res = await db.prepare('DELETE FROM designs WHERE id = ?').bind(id).run();
+    return res.meta?.changes ? json({ deleted: id }) : json({ error: 'Not found' }, 404);
+  }
+  return json({ error: 'Method not allowed' }, 405, { Allow: 'GET, PATCH, DELETE' });
 }
 
 async function api(request, env, url) {
@@ -193,6 +324,8 @@ async function api(request, env, url) {
   if (denied) return denied;
   await ensureSchema(env.DB);
   const base = publicBase(request, env);
+  const d = /^\/api\/designs(?:\/([^/]+))?\/?$/.exec(url.pathname);
+  if (d) return designsApi(request, env, url, base, d[1]);
   const m = /^\/api\/links(?:\/([A-Za-z0-9]+))?\/?$/.exec(url.pathname);
   if (!m) return json({ error: 'Not found' }, 404);
   const code = m[1];

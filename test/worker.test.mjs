@@ -134,7 +134,8 @@ test('creates links with incrementing codes and redirects to them', async () => 
   for (const [i, code] of codes.entries()) {
     const r = await call(`/c/${code}`);
     assert.equal(r.status, 302);
-    assert.equal(r.headers.get('Location'), new URL(dests[i]).href);
+    // explicit empty fragment: a QR code's shaping #fragment must not be copied onto the destination
+    assert.equal(r.headers.get('Location'), new URL(dests[i]).href + '#');
     assert.match(r.headers.get('Cache-Control'), /no-store/);
     await r.arrayBuffer();
   }
@@ -171,7 +172,7 @@ test('update and delete; deleted codes are never reused', async () => {
   assert.equal(r.status, 200);
   assert.equal((await r.json()).url, 'https://example.com/changed');
   r = await call('/c/b');
-  assert.equal(r.headers.get('Location'), 'https://example.com/changed');
+  assert.equal(r.headers.get('Location'), 'https://example.com/changed#');
   await r.arrayBuffer();
 
   r = await call('/api/links/c', { method: 'DELETE', headers: auth });
@@ -220,4 +221,90 @@ test('without ADMIN_TOKEN configured the API fails closed', async () => {
 test('PUBLIC_BASE_URL controls the short URL that goes in the QR code', async () => {
   const r = await wBase.call('/api/links', { method: 'POST', headers: auth, body: JSON.stringify({ url: 'https://example.com' }) });
   assert.equal((await r.json()).short, 'https://dancewithb.fun/c/a');
+});
+
+test('a destination with its own fragment keeps it', async () => {
+  let r = await call('/api/links', { method: 'POST', headers: auth, body: JSON.stringify({ url: 'https://example.com/app#/route' }) });
+  const { code } = await r.json();
+  r = await call(`/c/${code}`);
+  assert.equal(r.headers.get('Location'), 'https://example.com/app#/route');
+  await r.arrayBuffer();
+});
+
+// ---------------------------------------------------------------- saved designs
+
+const SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#fff"/><g fill="#000"><rect x="1" y="1" width="1" height="1"/></g></svg>';
+
+test('designs: save, list, fetch, rename, delete', async () => {
+  // a design whose text is one of our short links (with a shaping fragment) is linked to it
+  const text = `${w.base}/c/a#AbC-123_xyz`;
+  let r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({
+    name: 'Check-in sticker', details: 'Pink, 25 mm', text, svg: SVG, meta: { reliability: 0.97, minMm: 21 },
+  }) });
+  assert.equal(r.status, 201);
+  const saved = await r.json();
+  assert.equal(saved.name, 'Check-in sticker');
+  assert.equal(saved.link.code, 'a');
+  assert.equal(saved.link.url, 'https://dancewithb.fun/check-in');
+  assert.deepEqual(saved.meta, { reliability: 0.97, minMm: 21 });
+  assert.equal(saved.svg, undefined); // list/create responses stay small
+
+  r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'Plain text one', text: 'hello', svg: SVG }) });
+  const other = await r.json();
+  assert.equal(other.link, null);
+  assert.equal(other.details, '');
+
+  r = await call('/api/designs', { headers: auth });
+  const { designs } = await r.json();
+  assert.deepEqual(designs.map((d) => d.id), [other.id, saved.id]);
+  assert.ok(designs.every((d) => d.svg === undefined));
+
+  r = await call(`/api/designs/${saved.id}`, { headers: auth });
+  assert.equal((await r.json()).svg, SVG);
+
+  r = await call(`/api/designs/${saved.id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ name: 'Renamed', details: 'v2' }) });
+  const renamed = await r.json();
+  assert.equal(renamed.name, 'Renamed');
+  assert.equal(renamed.details, 'v2');
+
+  r = await call(`/api/designs/${other.id}`, { method: 'DELETE', headers: auth });
+  assert.equal(r.status, 200);
+  await r.arrayBuffer();
+  r = await call(`/api/designs/${other.id}`, { headers: auth });
+  assert.equal(r.status, 404);
+  await r.arrayBuffer();
+});
+
+test('designs: require the token and validate input', async () => {
+  let r = await call('/api/designs', { method: 'POST', body: JSON.stringify({ name: 'x', text: 'x', svg: SVG }) });
+  assert.equal(r.status, 401);
+  await r.arrayBuffer();
+  const bad = [
+    { text: 'x', svg: SVG },                                   // no name
+    { name: 'x'.repeat(101), text: 'x', svg: SVG },
+    { name: 'x', svg: SVG },                                   // no text
+    { name: 'x', text: 'x', svg: '<div/>' },
+    { name: 'x', text: 'x', svg: SVG.replace('<rect', '<script>alert(1)</script><rect') },
+    { name: 'x', text: 'x', svg: SVG.replace('<rect ', '<rect onload="alert(1)" ') },
+    { name: 'x', text: 'x', svg: SVG.replace('<rect ', '<a href="javascript:alert(1)"/><rect ') },
+    { name: 'x', text: 'x', svg: SVG, meta: [1, 2] },
+    { name: 'x', text: 'x', svg: SVG, details: 'd'.repeat(2001) },
+  ];
+  for (const body of bad) {
+    r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify(body) });
+    assert.equal(r.status, 400, JSON.stringify(body).slice(0, 80));
+    await r.arrayBuffer();
+  }
+  for (const id of ['0', 'abc', '-1', '1.5']) {
+    r = await call(`/api/designs/${id}`, { headers: auth });
+    assert.equal(r.status, 404, id);
+    await r.arrayBuffer();
+  }
+});
+
+test('designs: realistic generated SVGs fit', async () => {
+  const big = SVG.replace('</svg>', '<g fill="#e8365d">' + '<circle cx="1.5" cy="1.5" r="0.45"/>'.repeat(20000) + '</g></svg>');
+  const r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'Big', text: 'x', svg: big }) });
+  assert.equal(r.status, 201, `size ${big.length}`);
+  await r.arrayBuffer();
 });

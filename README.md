@@ -11,49 +11,84 @@ not a sticker placed on top. Upload any square image, enter a link, download a P
 
 ## Using it
 
-1. Enter the link or text.
-2. Drop in an image. Logos with a transparent background work best: transparent areas are left
-   as an ordinary QR code, opaque areas become the logo.
-3. Tune it and watch the **scan test** badge:
+1. **Link.** Paste your link, or press **Shorten** to turn it into a `/c/<code>` short link whose
+   destination you can change after printing.
+2. **Image.** Drop in a square image (non-square images are cropped or padded). Logos with a
+   transparent background work best: transparent areas stay an ordinary QR code.
+3. **Print width and scan distance.** Used to predict whether each design scans at your size.
+4. **Style** (all options keep scanner-friendly limits):
 
-   | Control | Effect |
+   | Option | Choices |
    |---|---|
-   | Logo sharpness | How much of the code's error-correction capacity is spent matching the logo. Higher = crisper logo, thinner safety margin. |
-   | Logo fill | Luminance cut-off. Raise it so mid-tone colours (e.g. a pink) become solid; lower it to leave them sparse. |
-   | Grid detail | Minimum QR version. A finer grid shows more logo detail but needs a larger print size. |
-   | Error correction | Low = sharpest logo, High = most robust. Medium is a good default. |
-   | Photo mode | Dithers shades into dots, for photographs rather than logos. |
-   | **Auto-tune** | Finds the sharpest setting that still passes the scan test. |
+   | Pixel shape | Dots, rounded squares, squares, connected |
+   | Corner eyes | Square, rounded, round dot (always solid, never dotted) |
+   | Contrast | High / Standard / Vivid: how dark logo-coloured pixels must be |
+   | Pixel size | 70–100% (never below 60%) |
+   | Dark colour, background | Warns when contrast is too low to scan |
 
-4. Download PNG or SVG. **Always test the final code with a phone before printing**, and print it
-   big enough (rule of thumb: the scanning distance should be at most ~10× the code's width).
+5. **Generate designs.** You get 16 candidates, a colour set and a black & white set, each with:
+   - **Scan reliability:** share of simulated phone-camera frames that decoded.
+   - **Min print size:** smallest width (mm) that still scanned reliably from your chosen distance.
+   - **At your print width:** expected scan rate at the size you entered.
+   - **Logo match:** how much of the logo the pattern reproduces.
 
-Tips: shorter links give a larger, clearer logo (consider a short redirect such as
-`yoursite.com/in`); bold, simple, high-contrast logos work best.
+   The **Recommended** pick in each set is the best-looking design that is still phone-safe at
+   your print size. Click any design to see a scan rate for each print width, download PNG/SVG,
+   or **Save** it with a name and details (see *Saved codes*).
+
+**Always test the final print with a few real phones** (see *Testing scan reliability*).
 
 ## How the logo gets into the pattern
 
-A QR code is a grid of data modules. This tool encodes your link normally, then makes the data
-modules *depict* the image, in two ways:
+The approach was reverse-engineered from a MosQR code, which decodes to
+`https://mosqr.co/<id>?m=qr#<55 random-looking characters>`:
 
-1. **Free pad bytes.** Decoders stop reading at the end-of-data marker and ignore every codeword
-   after it. Those bytes are set to whatever reproduces the image, and the Reed-Solomon codes are
-   recomputed over them. Modules there match the image exactly, at no cost.
-2. **Error budget.** The remaining modules (the link itself and the error-correction codewords)
-   are flipped to match the image where it matters most, deliberately creating errors that the
-   code's built-in error correction repairs. Only a chosen share of each block's capacity is used
-   (the *Logo sharpness* slider), so real-world scuffs, glare, and blur still decode.
+1. **A shaping fragment.** The tool appends `#` plus characters to the link until the text fills
+   the QR symbol exactly. Each character is chosen (per mask pattern) so its 8 bits draw the
+   image where they land. Browsers never send the `#…` part to the server, so the link still
+   works, and the code stays 100% standard. The redirect Worker answers with an explicit empty
+   fragment, so the shaping characters don't follow you to the destination page.
+2. **An error budget.** The remaining modules (the link itself and the error-correction
+   codewords) are flipped to match the image where it matters most. Error correction repairs
+   them when scanned. MosQR spends ~92% of the repair capacity this way (12 of 13 codewords per
+   block); here the variants spend 20% (*Gentle*) or 60% (*Bold*), and every design's cost is
+   measured rather than guessed.
 
-Dark modules inside the logo take the logo's colours (darkened enough to read as "dark" to a
-scanner), and the three corner finder patterns stay solid black, since dotted finders fail to
-detect in many decoders. The mask pattern that fits the image best is chosen out of the 8
-allowed by the spec.
+For text that isn't a fragment-friendly http(s) link, the image goes into the pad bytes after
+the end-of-data marker instead (decoders ignore them).
+
+Each request produces 8 plans (error correction Q or H × compact or detailed grid × gentle or
+bold), rendered in colour and in black & white. Logo-coloured pixels are darkened to the
+contrast limit; finders, alignment and timing patterns stay solid so scanners can lock on.
+
+## Testing scan reliability
+
+**In the tool (automatic).** Every candidate is printed to a virtual camera: rotated ±20°,
+skewed, blurred, under- or over-exposed, with sensor noise, at 2.5–6 camera pixels per module.
+Each frame is decoded by:
+
+- **ZXing-C++** (WebAssembly build), the family of decoders behind many Android scanner apps;
+- **jsQR**, a stricter, quirkier JavaScript decoder;
+- **the phone OS's own scanner** when the browser exposes it (`BarcodeDetector` in Chrome on
+  Android and macOS), so running the tool on an Android phone tests with Google's scanner.
+
+Print-size estimates assume a typical phone scanner feed (1280 px wide, ~66° field of view).
+
+**In the real world (recommended before printing a batch):**
+
+- Print a test sheet with your top 2–3 designs at the planned size **and one size smaller**.
+- Scan each with the iPhone Camera app (Apple Vision), an Android camera / Google Lens
+  (ML Kit), and WeChat or a third-party scanner app, at arm's length and at an angle, in dim
+  light. Older and budget Android phones are the strictest.
+- Every scan of a short link is counted on the *Short links* page, so a group test shows up as hits.
+- For larger campaigns, a cloud device farm with camera image injection (e.g. BrowserStack App
+  Automate) can feed your design to many real phones' scanner apps.
 
 ## Develop
 
 ```sh
 npm install
-npm test        # encoder, art layer, scan checks (jsQR), and the Worker (runs wrangler dev)
+npm test        # encoder, art + fragment layers, styles, scan simulator, generator, Worker API
 npm run dev     # serves ./public through the Workers runtime at http://localhost:8787
 ```
 
@@ -63,12 +98,17 @@ Source layout (`public/` is the whole site):
 |---|---|
 | `js/qr.js` | QR encoder (byte mode, v1–40, L/M/Q/H) that exposes the codeword layout |
 | `js/art.js` | Image → module targets, pad-byte fitting, error-budget flipping, mask choice |
-| `js/render.js` | Shapes → SVG / Canvas / software raster |
-| `js/verify.js` | Scan test: decodes the render at several resolutions, crisp and blurred |
+| `js/fragment.js` | The MosQR model: link + shaping `#fragment` that fills the symbol |
+| `js/generate.js` | Plans the 8 variants, renders colour + B/W, scores each candidate |
+| `js/gen-worker.js` | Runs `generate.js` in a Web Worker with all available decoders |
+| `js/render.js` | Pixel shapes / eye styles → SVG, Canvas and software raster |
+| `js/verify.js` | Phone-camera simulator, stress test, print-size estimates, decoder adapters |
 | `js/app.js`, `index.html`, `css/` | The QR maker UI |
-| `src/worker.js` | Redirect Worker + admin API |
-| `links.html`, `js/links.js` | Short-link manager UI |
-| `vendor/jsQR.js` | [jsQR](https://github.com/cozmo/jsQR) (Apache-2.0), used only for the in-page scan test |
+| `src/worker.js` | Redirect Worker + admin API (short links, saved designs) |
+| `links.html`, `js/links.js` | Short-link manager |
+| `saved.html`, `js/saved.js` | Saved codes |
+| `vendor/jsQR.js` | [jsQR](https://github.com/cozmo/jsQR) (Apache-2.0) |
+| `vendor/zxing/` | [zxing-wasm](https://github.com/Sec-ant/zxing-wasm) reader (MIT, ZXing-C++ Apache-2.0) |
 
 ## Short links (redirect Worker)
 
@@ -82,7 +122,9 @@ Worker redirects (HTTP 302) to wherever that code currently points.
   later, delete, and see scan counts. "QR" opens the maker with the short URL filled in.
 - **API** (all need `Authorization: Bearer <ADMIN_TOKEN>`):
   `POST /api/links {url, label?}`, `GET /api/links`, `PATCH /api/links/<code> {url?, label?}`,
-  `DELETE /api/links/<code>`. Only `http(s)` destinations are accepted, so the endpoint can't be
+  `DELETE /api/links/<code>`; saved designs: `POST /api/designs {name, details?, text, svg, meta?}`,
+  `GET /api/designs`, `GET|PATCH|DELETE /api/designs/<id>`. Saved SVGs containing scripts, event
+  handlers or links are rejected. Only `http(s)` destinations are accepted, so the endpoint can't be
   used for `javascript:` links. Without `ADMIN_TOKEN` set, the API refuses everything.
 - **Storage** is one D1 table, created automatically on first use. Each scan costs one read and one
   write; the free plan allows on the order of 100k writes/day (check Cloudflare's current limits).
@@ -117,9 +159,10 @@ For local development create `.dev.vars` containing `ADMIN_TOKEN=anything` and r
 
 ## Limitations
 
-- Fidelity is bounded by the code's capacity: roughly the share of "free" pad bytes plus the
-  error budget. Opaque, high-contrast artwork reproduces less exactly than a logo with a
-  transparent background; a finer grid and lower error-correction level help.
-- The scan test uses jsQR, which is stricter than modern phone cameras in some ways and quirkier
-  in others. The code was also checked against ZXing-C++ and OpenCV, but a real-phone test is the
-  final word.
+- The scan simulator is a model, not a phone. It ranks designs well, but always confirm the
+  final print on real devices.
+- Logo detail is bounded by the code's capacity (shaping characters plus the error budget). Bold,
+  simple, high-contrast logos with transparent backgrounds reproduce best.
+- Shaping fragments are appended to web links. Destinations that use `#` routing should go through
+  a short link (the redirect drops the fragment).
+- Generation runs in a module Web Worker (all current browsers; Safari 15+).

@@ -70,3 +70,15 @@ export function writePng(path, { data, width, height }) {
     chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0)),
   ]));
 }
+
+/** ZXing-C++ (WebAssembly) set up to load its wasm from node_modules, as the browser loads it from /vendor. */
+let zxingReady = null;
+export async function zxing() {
+  zxingReady ??= (async () => {
+    const { readBarcodes, prepareZXingModule } = await import('zxing-wasm/reader');
+    const w = fs.readFileSync(new URL('../node_modules/zxing-wasm/dist/reader/zxing_reader.wasm', import.meta.url));
+    prepareZXingModule({ overrides: { wasmBinary: w.buffer.slice(w.byteOffset, w.byteOffset + w.byteLength) }, fireImmediately: true });
+    return readBarcodes;
+  })();
+  return zxingReady;
+}

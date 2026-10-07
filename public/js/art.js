@@ -24,6 +24,19 @@ export const WANT_LIGHT = 2;
 
 const OPAQUE = 0.4; // coverage above which a module counts as "image"
 
+const maskCache = new Map();
+/** Mask bit per module (cached per size and mask). */
+export function maskGrid(size, mask) {
+  const key = size * 8 + mask;
+  let g = maskCache.get(key);
+  if (!g) {
+    g = new Uint8Array(size * size);
+    for (let i = 0; i < g.length; i++) g[i] = maskBit(mask, i % size, (i / size) | 0) ? 1 : 0;
+    maskCache.set(key, g);
+  }
+  return g;
+}
+
 export const luminance = (r, g, b) => (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 
 /**
@@ -64,6 +77,18 @@ export function sampleImage(img, size, scale) {
     }
   }
   return { a, r: R, g: G, b: B };
+}
+
+/**
+ * Everything the image asks of a given layout: per-module colour samples plus
+ * the dark/light wish and its weight. Reusable across masks and fragment fits.
+ */
+export function buildTargets(layout, image, { imageScale = 1, threshold = 0.5, deadzone = 0.15, halftone = false } = {}) {
+  const N = layout.size * layout.size;
+  const samples = image
+    ? sampleImage(image, layout.size, imageScale)
+    : { a: new Float32Array(N), r: new Float32Array(N), g: new Float32Array(N), b: new Float32Array(N) };
+  return { samples, ...computeWants(layout, samples, { threshold, deadzone, halftone }) };
 }
 
 /** Decide, per data module, whether the image wants it dark or light. */
@@ -122,11 +147,16 @@ function computeWants(layout, samples, { threshold, deadzone, halftone }) {
  * @param {number} [o.deadzone]     mid-tone band left to the data (no-halftone mode)
  * @param {number} [o.strength]     share of each block's ECC capacity to spend (0-1)
  * @param {boolean} [o.halftone]    dither photos into dark/light modules
+ * @param {number[]} [o.masks]      restrict the mask search (default: all 8)
+ * @param {object} [o.targets]      precomputed buildTargets() for this version/ecl
+ * @param {boolean} [o.freePadding] fill pad bytes with the image (default) or keep
+ *                                  the spec's 0xEC/0x11 pattern
  */
 export function planArt(o) {
   const {
     text, ecl, minVersion = 1, image = null, imageScale = 1,
     threshold = 0.5, deadzone = 0.15, strength = 0.6, halftone = false,
+    masks = [0, 1, 2, 3, 4, 5, 6, 7], targets = null, freePadding = true,
   } = o;
   const bytes = new TextEncoder().encode(text);
   const version = pickVersion(bytes.length, ecl, minVersion);
@@ -135,33 +165,25 @@ export function planArt(o) {
   const { size, order, rawCodewords: raw } = layout;
   const N = size * size;
 
-  const samples = image
-    ? sampleImage(image, size, imageScale)
-    : { a: new Float32Array(N), r: new Float32Array(N), g: new Float32Array(N), b: new Float32Array(N) };
-  const { want, wgt, hasImg, lum } = computeWants(layout, samples, { threshold, deadzone, halftone });
+  const { samples, want, wgt, hasImg, lum } = targets && targets.want.length === N
+    ? targets
+    : buildTargets(layout, image, { imageScale, threshold, deadzone, halftone });
 
   const { data: prefixData, prefixLen } = buildDataPrefix(bytes, version, ecl);
   const tCap = Math.floor(layout.eccLen / 2);
   const budget = Math.floor(tCap * strength);
 
-  // mask bit per module, per mask
-  const maskGrids = [];
-  for (let m = 0; m < 8; m++) {
-    const g = new Uint8Array(N);
-    for (let i = 0; i < N; i++) g[i] = maskBit(m, i % size, (i / size) | 0) ? 1 : 0;
-    maskGrids.push(g);
-  }
 
   let totalWeight = 0;
   for (let i = 0; i < N; i++) if (want[i]) totalWeight += wgt[i];
 
   let best = null;
-  for (let mask = 0; mask < 8; mask++) {
-    const mg = maskGrids[mask];
+  for (const mask of masks) {
+    const mg = maskGrid(size, mask);
 
     // 1. free pad bytes carry the image
     const data = prefixData.slice();
-    for (let d = prefixLen; d < layout.numData; d++) {
+    for (let d = freePadding ? prefixLen : layout.numData; d < layout.numData; d++) {
       const padByte = (d - prefixLen) % 2 === 0 ? 0xec : 0x11;
       const p = layout.dataPos[d];
       let byte = 0;
@@ -225,11 +247,12 @@ export function planArt(o) {
   const maxUsed = Math.max(...best.used);
 
   return {
-    version, size, ecl, mask: best.mask,
+    text, version, size, ecl, mask: best.mask,
     dark: best.m, fn: layout.fn,
     want, hasImg, lum, alpha: samples.a, r: samples.r, g: samples.g, b: samples.b,
     stats: {
-      freeBytes: layout.numData - prefixLen,
+      freeBytes: freePadding ? layout.numData - prefixLen : 0,
+      penalty: best.pen,
       dataBytes: layout.numData,
       matchedFraction: totalWeight ? 1 - best.cost / totalWeight : 1,
       matchedModules: matchCount,
