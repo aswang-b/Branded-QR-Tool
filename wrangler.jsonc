@@ -16,7 +16,11 @@
   },
   "d1_databases": [
     // No database_id: `wrangler deploy` creates and binds the database for you.
-    { "binding": "DB", "database_name": "branded-qr-links" }
+    {
+      "binding": "DB",
+      "database_name": "branded-qr-links",
+      "database_id": "3cba390f-2849-471e-91ad-5c4268c18807"
+    }
   ],
   "vars": {
     // The permanent public origin that goes into printed QR codes, e.g.
