@@ -57,7 +57,12 @@ const freePort = () => new Promise((resolve, reject) => {
 async function startWorker(vars = {}) {
   const port = await freePort();
   const state = fs.mkdtempSync(path.join(os.tmpdir(), 'qr-worker-'));
-  const args = ['dev', '--port', String(port), '--ip', '127.0.0.1', '--inspector-port', '0', '--persist-to', state, '--log-level', 'error'];
+  const args = ['dev', '--port', String(port), '--ip', '127.0.0.1', '--inspector-port', '0', '--persist-to', state, '--log-level', 'error',
+    // The custom-domain route in wrangler.jsonc would otherwise make local requests
+    // look like they came from qr.dancewithb.fun.
+    '--local-upstream', `127.0.0.1:${port}`];
+  // Tests must not depend on the production origin pinned in wrangler.jsonc.
+  vars = { PUBLIC_BASE_URL: '', ...vars };
   for (const [k, v] of Object.entries(vars)) args.push('--var', `${k}:${v}`);
   const proc = spawn(path.join(ROOT, 'node_modules/.bin/wrangler'), args, {
     cwd: ROOT, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1', NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'],

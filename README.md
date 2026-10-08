@@ -143,11 +143,12 @@ npx wrangler secret put ADMIN_TOKEN  # choose a long random string; it's your lo
 
 Then:
 
-1. **Use your own domain.** In the Cloudflare dashboard, open the Worker → *Settings → Domains &
-   Routes → Add → Custom domain* (the domain's DNS must be on Cloudflare). Printed codes should
-   use this permanent domain, not `*.workers.dev`.
-2. **Pin the domain into QR codes.** Set `PUBLIC_BASE_URL` in `wrangler.jsonc` to e.g.
-   `"https://dancewithb.fun"` and redeploy. Short links are then always reported with that origin,
+1. **Use your own domain.** `wrangler.jsonc` attaches the custom domain `qr.dancewithb.fun` on
+   deploy (the domain's DNS must be on Cloudflare). Use a subdomain: attaching the bare domain
+   would replace whatever site already lives there. Printed codes should use this permanent
+   domain, not `*.workers.dev`.
+2. **Pin the domain into QR codes.** `PUBLIC_BASE_URL` in `wrangler.jsonc` is set to
+   `"https://qr.dancewithb.fun"`; change both together if you move it. Short links are then always reported with that origin,
    even if you manage them from another address.
 3. Open `https://yourdomain/links.html`, sign in, create a link, and click **QR**.
 

@@ -2,6 +2,10 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "branded-qr-tool",
   "main": "src/worker.js",
+  // Serve on a subdomain so the main dancewithb.fun site is untouched.
+  // `wrangler deploy` creates the DNS record and certificate (the zone must be
+  // on this Cloudflare account). Never attach the bare domain here.
+  "routes": [{ "pattern": "qr.dancewithb.fun", "custom_domain": true }],
   "compatibility_date": "2025-10-01",
   "assets": {
     "directory": "./public",
@@ -16,8 +20,8 @@
   ],
   "vars": {
     // The permanent public origin that goes into printed QR codes, e.g.
-    // "https://dancewithb.fun". Leave empty to use whichever origin you
+    // "https://qr.dancewithb.fun". Leave empty to use whichever origin you
     // create links from.
-    "PUBLIC_BASE_URL": ""
+    "PUBLIC_BASE_URL": "https://qr.dancewithb.fun"
   }
 }
