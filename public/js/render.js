@@ -18,6 +18,7 @@ export const DEFAULT_STYLE = {
   keepColors: true,         // tint dark modules with the image colours
   maxLum: 0.45,             // brightest allowed tinted dark module (0-1); lower = more contrast
   tintLight: false,         // also tint light modules inside the image
+  lightLum: 0.86,           // tinted light modules are lightened to at least this (0-1)
   quiet: 4,                 // quiet zone, in modules
 };
 
@@ -55,10 +56,9 @@ function darkColor(plan, i, s) {
   return c;
 }
 
-function lightColor(plan, i) {
+function lightColor(plan, i, target) {
   const c = [plan.r[i], plan.g[i], plan.b[i]];
   const L = luminance(c[0], c[1], c[2]);
-  const target = 0.86;
   if (L >= target) return c;
   const t = (target - L) / (1 - L);
   return c.map((v) => v + (255 - v) * t);
@@ -90,8 +90,10 @@ export function buildShapes(plan, style = {}) {
   if (s.tintLight && s.keepColors) {
     for (let i = 0; i < size * size; i++) {
       if (dark[i] || plan.fn[i] || !plan.hasImg[i]) continue;
+      // Black/grey logo areas would only turn grey: keep those light modules white.
+      if (Math.max(plan.r[i], plan.g[i], plan.b[i]) - Math.min(plan.r[i], plan.g[i], plan.b[i]) < 40) continue;
       const x = i % size, y = (i / size) | 0;
-      shapes.push({ t: 'r', x: x + q - 0.01, y: y + q - 0.01, w: 1.02, h: 1.02, rx: 0, c: lightColor(plan, i) });
+      shapes.push({ t: 'r', x: x + q - 0.01, y: y + q - 0.01, w: 1.02, h: 1.02, rx: 0, c: lightColor(plan, i, s.lightLum) });
     }
   }
 

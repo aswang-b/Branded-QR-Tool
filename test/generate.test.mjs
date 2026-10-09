@@ -103,7 +103,8 @@ test('stress test: plain codes are reliable, over-forced ones are not', async ()
 });
 
 test('print-size helpers', () => {
-  assert.ok(Math.abs(cameraPxPerMm(150) - 6.57) < 0.05);
+  // MosaicQR baseline: a 57-module code passing from 4 px/module rates 20 mm
+  assert.ok(Math.abs(minPrintMm(4, 57, 150) - 20) < 0.1);
   assert.ok(cameraPxPerMm(300) < cameraPxPerMm(150));
   const total = 41;
   assert.ok(minPrintMm(3, total, 150) < minPrintMm(4, total, 150));

@@ -22,7 +22,7 @@ not a sticker placed on top. Upload any square image, enter a link, download a P
    |---|---|
    | Pixel shape | Dots, rounded squares, squares, connected |
    | Corner eyes | Square, rounded, round dot (always solid, never dotted) |
-   | Contrast | High / Standard / Vivid: how dark logo-coloured pixels must be |
+   | Contrast | High / Standard / Vivid: how dark logo-coloured pixels must be. Vivid keeps logo colours as bright as MosaicQR does (and tints light pixels more), at some cost to scan rate |
    | Pixel size | 70–100% (never below 60%) |
    | Dark colour, background | Warns when contrast is too low to scan |
 
@@ -72,7 +72,10 @@ Each frame is decoded by:
 - **the phone OS's own scanner** when the browser exposes it (`BarcodeDetector` in Chrome on
   Android and macOS), so running the tool on an Android phone tests with Google's scanner.
 
-Print-size estimates assume a typical phone scanner feed (1280 px wide, ~66° field of view).
+Print-size estimates are calibrated against MosaicQR, which rates its v8 codes (57 modules
+including margin) for 20 mm prints: an equivalent code passes the stress test from 4 camera
+pixels per module, so the "15 cm" setting assumes 11.4 camera px per printed mm (about a 1080p
+scanner frame at 13 cm). Adjust `PX_PER_MM_AT_150` in `verify.js` once real-phone tests disagree.
 
 **In the real world (recommended before printing a batch):**
 

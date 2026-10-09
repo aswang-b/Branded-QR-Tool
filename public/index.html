@@ -49,7 +49,7 @@
       <div class="grid2">
         <div class="field">
           <label for="printMm">Print width <span class="muted">mm</span></label>
-          <input id="printMm" type="number" min="10" max="1000" step="1" value="25" inputmode="numeric">
+          <input id="printMm" type="number" min="10" max="1000" step="1" value="20" inputmode="numeric">
         </div>
         <div class="field">
           <label for="distance">Scanned from</label>
@@ -86,9 +86,9 @@
           <div class="field">
             <label for="contrast">Contrast</label>
             <select id="contrast">
-              <option value="0.32">High (most readable)</option>
-              <option value="0.4" selected>Standard</option>
-              <option value="0.47">Vivid colours</option>
+              <option value="0.32" data-light="0.9">High (most readable)</option>
+              <option value="0.4" data-light="0.86" selected>Standard</option>
+              <option value="0.56" data-light="0.78">Vivid colours (like MosaicQR)</option>
             </select>
           </div>
           <div class="field">
@@ -118,7 +118,7 @@
           <input id="fill" type="range" min="30" max="90" value="65">
           <p class="hint">Raise to make mid-tone colours solid; lower to leave them sparse.</p>
         </div>
-        <label class="check"><input id="tintLight" type="checkbox"> Tint light pixels inside the logo (colour set)</label>
+        <label class="check"><input id="tintLight" type="checkbox" checked> Tint light pixels inside the logo (colour set)</label>
         <div class="field">
           <label for="quiet">Margin <output id="quietOut">4</output> <span class="muted">modules</span></label>
           <input id="quiet" type="range" min="2" max="6" value="4">

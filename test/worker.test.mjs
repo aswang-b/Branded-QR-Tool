@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import { fileURLToPath } from 'node:url';
 import { encodeId, decodeCode } from '../src/worker.js';
 
 // ---------------------------------------------------------------- code sequence
@@ -47,7 +48,7 @@ test('decodeCode rejects junk', () => {
 // Runs the real thing: `wrangler dev` (workerd runtime, local D1, static assets),
 // so routing between assets and the Worker is exercised too.
 
-const ROOT = new URL('..', import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const freePort = () => new Promise((resolve, reject) => {
   const srv = net.createServer();
   srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
@@ -64,7 +65,8 @@ async function startWorker(vars = {}) {
   // Tests must not depend on the production origin pinned in wrangler.jsonc.
   vars = { PUBLIC_BASE_URL: '', ...vars };
   for (const [k, v] of Object.entries(vars)) args.push('--var', `${k}:${v}`);
-  const proc = spawn(path.join(ROOT, 'node_modules/.bin/wrangler'), args, {
+  // Run wrangler's JS entry with node: works on Windows too (no .cmd shim, spaces in paths).
+  const proc = spawn(process.execPath, [path.join(ROOT, 'node_modules/wrangler/bin/wrangler.js'), ...args], {
     cwd: ROOT, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1', NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '';
@@ -82,9 +84,13 @@ async function startWorker(vars = {}) {
     base,
     call: (p, init) => fetch(base + p, { redirect: 'manual', ...init }),
     async stop() {
-      proc.kill('SIGTERM');
-      await new Promise((r) => { proc.once('exit', r); setTimeout(r, 3000); });
-      fs.rmSync(state, { recursive: true, force: true });
+      const exited = new Promise((r) => { proc.once('exit', r); setTimeout(r, 3000); });
+      // On Windows, killing the node wrapper leaves workerd running: end the whole tree.
+      if (process.platform === 'win32') spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
+      else proc.kill('SIGTERM');
+      await exited;
+      // Best effort: Windows can hold the local D1 files a moment longer; it's a temp dir.
+      try { fs.rmSync(state, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch { /* left for the OS */ }
     },
   };
 }

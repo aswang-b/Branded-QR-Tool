@@ -16,7 +16,7 @@ let worker = null;
 let jobId = 0;
 let candidates = [];
 let selected = null;
-let lastPrint = { mm: 25, distanceMm: 150 };
+let lastPrint = { mm: 20, distanceMm: 150 };
 
 // ------------------------------------------------------------------ admin token (shared with links/saved pages)
 
@@ -106,6 +106,7 @@ function readRequest() {
       eyes: $('eyes').value,
       dotScale: +$('dotScale').value / 100,
       maxLum: +$('contrast').value,
+      lightLum: +$('contrast').selectedOptions[0].dataset.light,
       fg,
       bg,
       tintLight: $('tintLight').checked,

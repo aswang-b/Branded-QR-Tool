@@ -172,8 +172,15 @@ export async function stressTest(rendered, text, decoders, { ppms = STRESS_PPMS,
   };
 }
 
-/** Camera pixels per printed mm for a typical phone scanner feed (1280 px wide, ~66° FOV). */
-export const cameraPxPerMm = (distanceMm = 150) => 1280 / (2 * distanceMm * Math.tan((66 * Math.PI) / 360));
+/**
+ * Camera pixels per printed mm at a scan distance. Calibrated against MosaicQR,
+ * whose v8 code (57 modules incl. margin) it rates for 20 mm prints: an
+ * equivalent code passes our stress test from 4 px/module, so 15 cm maps to
+ * 57 * 4 / 20 = 11.4 px/mm (about a 1080p scanner frame at 13 cm, 66° lens).
+ * Real-phone tests should refine this constant.
+ */
+const PX_PER_MM_AT_150 = 11.4;
+export const cameraPxPerMm = (distanceMm = 150) => (PX_PER_MM_AT_150 * 150) / distanceMm;
 
 /** Smallest print width (mm, incl. margin) at which the code passed the stress test. */
 export const minPrintMm = (minPpm, total, distanceMm = 150) =>
