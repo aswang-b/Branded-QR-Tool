@@ -6,6 +6,9 @@
   // `wrangler deploy` creates the DNS record and certificate (the zone must be
   // on this Cloudflare account). Never attach the bare domain here.
   "routes": [{ "pattern": "qr.dancewithb.fun", "custom_domain": true }],
+  // Only the custom domain serves the tool: no *.workers.dev URL, no preview URLs.
+  "workers_dev": false,
+  "preview_urls": false,
   "compatibility_date": "2025-10-01",
   "assets": {
     "directory": "./public",
