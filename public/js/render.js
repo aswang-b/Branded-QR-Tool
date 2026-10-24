@@ -57,7 +57,10 @@ function darkColor(plan, i, s) {
 }
 
 function lightColor(plan, i, target) {
-  const c = [plan.r[i], plan.g[i], plan.b[i]];
+  // Keep the hue, drop the darkness: an edge pixel half pink, half black
+  // should tint pale pink, not grey.
+  const peak = Math.max(1, plan.r[i], plan.g[i], plan.b[i]);
+  const c = [plan.r[i], plan.g[i], plan.b[i]].map((v) => (v * 255) / peak);
   const L = luminance(c[0], c[1], c[2]);
   if (L >= target) return c;
   const t = (target - L) / (1 - L);

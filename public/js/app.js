@@ -37,19 +37,23 @@ async function api(path, { method = 'GET', body } = {}) {
 
 // ------------------------------------------------------------------ image handling
 
+// The dancewithb.fun favicon (public/favicon.svg on that site), drawn from its
+// vector path so the demo logo is sharp at any size.
+const DWB_B = new Path2D('M150 1466L736 1466Q910 1466 995.5 1451.5Q1081 1437 1148.5 1391Q1216 1345 1261 1268.5Q1306 1192 1306 1097Q1306 994 1250.5 908Q1195 822 1100 779Q1234 740 1306 646Q1378 552 1378 425Q1378 325 1331.5 230.5Q1285 136 1204.5 79.5Q1124 23 1006 10Q932 2 649 0L150 0ZM446 1222L446 883L640 883Q813 883 855 888Q931 897 974.5 940.5Q1018 984 1018 1055Q1018 1123 980.5 1165.5Q943 1208 869 1217Q825 1222 616 1222ZM446 639L446 247L720 247Q880 247 923 256Q989 268 1030.5 314.5Q1072 361 1072 439Q1072 505 1040 551Q1008 597 947.5 618Q887 639 685 639Z');
+
 function demoCanvas() {
   const c = document.createElement('canvas');
   c.width = c.height = SQUARE_PX;
   const g = c.getContext('2d');
-  g.fillStyle = '#ff4b69';
+  g.scale(SQUARE_PX / 64, SQUARE_PX / 64);
+  g.fillStyle = '#170f0d';
   g.beginPath();
-  g.roundRect(60, 60, 392, 392, 90);
+  g.roundRect(0, 0, 64, 64, 12);
   g.fill();
-  g.fillStyle = '#000';
-  g.font = '900 330px system-ui, "Segoe UI", Arial, sans-serif';
-  g.textAlign = 'center';
-  g.textBaseline = 'middle';
-  g.fillText('B', 256, 276);
+  g.translate(12.655, 50.56);
+  g.scale(0.025321, -0.025321);
+  g.fillStyle = '#ff5577';
+  g.fill(DWB_B);
   return c;
 }
 
@@ -406,7 +410,7 @@ for (const id of ['fg', 'bg']) $(id).addEventListener('input', () => { checkColo
 $('fit').addEventListener('input', () => { makeSquare(); markStale(); });
 $('pick').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', (e) => loadFile(e.target.files[0]));
-$('useDemo').addEventListener('click', () => setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'Demo logo'));
+$('useDemo').addEventListener('click', () => setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'dancewithb.fun logo'));
 $('clearImg').addEventListener('click', () => setSource(null, 0, 0, 'No image'));
 $('generate').addEventListener('click', generate);
 $('dlPng').addEventListener('click', exportPng);
@@ -428,4 +432,4 @@ const presetText = new URLSearchParams(location.search).get('text');
 if (presetText) $('text').value = presetText;
 syncLabels();
 checkColors();
-setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'Demo logo');
+setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'dancewithb.fun logo');
