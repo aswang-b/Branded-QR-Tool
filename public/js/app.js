@@ -433,3 +433,14 @@ if (presetText) $('text').value = presetText;
 syncLabels();
 checkColors();
 setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'dancewithb.fun logo');
+
+// The settings column scrolls on its own (desktop layout); size it to the
+// space actually left in the window so its bottom, with Generate, stays visible.
+function fitControls() {
+  const panel = document.querySelector('.controls');
+  const top = Math.max(16, panel.getBoundingClientRect().top);
+  panel.style.setProperty('--controls-max', `${window.innerHeight - top - 16}px`);
+}
+addEventListener('scroll', fitControls, { passive: true });
+addEventListener('resize', fitControls);
+fitControls();

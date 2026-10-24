@@ -118,7 +118,10 @@ a { color: var(--accent); }
 /* generator layout */
 @media (min-width: 900px) {
   .layout { grid-template-columns: 360px minmax(0, 1fr); }
-  .controls { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
+  /* --controls-max is kept up to date by app.js: the space left below the panel's top. */
+  .controls { position: sticky; top: 16px; max-height: var(--controls-max, calc(100vh - 32px)); overflow: auto; }
+  /* The settings column scrolls on its own: keep Generate in view at its bottom. */
+  .controls #generate { position: sticky; bottom: 0; z-index: 1; box-shadow: 0 -10px 0 2px var(--panel), 0 8px 0 2px var(--panel); }
 }
 .top, .layout { max-width: 1280px; }
 .row.nowrap { flex-wrap: nowrap; }
