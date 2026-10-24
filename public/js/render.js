@@ -89,14 +89,25 @@ export function buildShapes(plan, style = {}) {
   const d = Math.max(MIN_DOT_SCALE, Math.min(1, s.dotScale));
   const shapes = [];
   const isData = (x, y) => x >= 0 && y >= 0 && x < size && y < size && dark[y * size + x] && !plan.fn[y * size + x];
+  const o = (1 - d) / 2;
+  // One module in the chosen pixel shape (without the "connected" bridges).
+  const pixel = (px, py, c) => {
+    if (s.shape === 'dots') return { t: 'c', cx: px + 0.5, cy: py + 0.5, r: d / 2, c };
+    if (s.shape === 'connected') return { t: 'r', x: px + o, y: py + o, w: d, h: d, rx: d * 0.5, c };
+    const w = d >= 0.999 ? 1.02 : d; // tiny overlap hides hairline seams
+    const ow = (1 - w) / 2;
+    return { t: 'r', x: px + ow, y: py + ow, w, h: w, rx: s.shape === 'rounded' ? w * 0.3 : 0, c };
+  };
 
+  // Light logo modules become pale pixels of the same shape (as MosaicQR draws
+  // them), not a solid underlay, so the logo is made of pixels only.
   if (s.tintLight && s.keepColors) {
     for (let i = 0; i < size * size; i++) {
       if (dark[i] || plan.fn[i] || !plan.hasImg[i]) continue;
       // Black/grey logo areas would only turn grey: keep those light modules white.
       if (Math.max(plan.r[i], plan.g[i], plan.b[i]) - Math.min(plan.r[i], plan.g[i], plan.b[i]) < 40) continue;
       const x = i % size, y = (i / size) | 0;
-      shapes.push({ t: 'r', x: x + q - 0.01, y: y + q - 0.01, w: 1.02, h: 1.02, rx: 0, c: lightColor(plan, i, s.lightLum) });
+      shapes.push(pixel(x + q, y + q, lightColor(plan, i, s.lightLum)));
     }
   }
 
@@ -117,18 +128,11 @@ export function buildShapes(plan, style = {}) {
       shapes.push({ t: 'r', x: px - 0.01, y: py - 0.01, w: 1.02, h: 1.02, rx: 0, c: color });
       continue;
     }
-    const o = (1 - d) / 2;
-    if (s.shape === 'dots') {
-      shapes.push({ t: 'c', cx: px + 0.5, cy: py + 0.5, r: d / 2, c: color });
-    } else if (s.shape === 'connected') {
+    shapes.push(pixel(px, py, color));
+    if (s.shape === 'connected') {
       // rounded blobs that bridge into dark right/lower neighbours
-      shapes.push({ t: 'r', x: px + o, y: py + o, w: d, h: d, rx: d * 0.5, c: color });
       if (isData(x + 1, y)) shapes.push({ t: 'r', x: px + 0.5, y: py + o, w: 1, h: d, rx: 0, c: color });
       if (isData(x, y + 1)) shapes.push({ t: 'r', x: px + o, y: py + 0.5, w: d, h: 1, rx: 0, c: color });
-    } else {
-      const w = d >= 0.999 ? 1.02 : d; // tiny overlap hides hairline seams
-      const ow = (1 - w) / 2;
-      shapes.push({ t: 'r', x: px + ow, y: py + ow, w, h: w, rx: s.shape === 'rounded' ? w * 0.3 : 0, c: color });
     }
   }
   return { shapes, total, bg: s.bg };
