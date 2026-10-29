@@ -10,6 +10,7 @@ const LINK = {
   short: 'string: full short URL that goes in a QR code, e.g. https://qr.dancewithb.fun/c/a',
   url: 'string: current destination',
   label: 'string',
+  author: 'string: whose link this is ("" when none); author tokens only reach their own',
   hits: 'number: scans (GET requests to the short URL)',
   created_at: 'number: Unix seconds',
   last_hit: 'number | null: Unix seconds',
@@ -30,14 +31,16 @@ const DESIGN = {
 
 const AUTHOR = {
   name: 'string: the author, as stored on their saved codes',
-  token: 'string: their API token ("qra_…"); viewable again with author.read',
+  token: 'string: their API token ("qra_…"); returned by author.create/update, author.read {name}, and author.read {include_tokens: true}',
   created_at: 'number: Unix seconds',
   last_used: 'number | null: Unix seconds the token was last used',
   codes: 'number: saved codes with this author',
+  links: 'number: short links with this author',
 };
 
 // An author token is always limited to its own author; the admin may filter by one.
 const AUTHOR_SCOPE = param('author', 'string', false, 'Author token: not needed (always its own author; a different one is refused with 403). Admin: optional filter.');
+const ADOPT = param('adopt_existing', 'boolean', false, 'Codes or links already labelled with this name (e.g. left by a revoked author) are refused with 409 unless this is true, which hands them to this author\'s token.');
 
 export const METHOD_DOCS = {
   'link.create': {
@@ -45,6 +48,7 @@ export const METHOD_DOCS = {
     params: [
       param('url', 'string', true, 'Destination: an absolute http(s) URL, up to 2048 characters. Must not point at another short link.'),
       param('label', 'string', false, 'A note for yourself, up to 100 characters.'),
+      param('author', 'string', false, 'Whose link this is, up to 200 characters. That author\'s token can then read and repoint it.'),
     ],
     returns: 'The link (status 201).',
     example: { url: 'https://dancewithb.fun/check-in', label: 'Class check-in' },
@@ -53,6 +57,7 @@ export const METHOD_DOCS = {
     summary: 'Read one short link, or list them.',
     params: [
       param('code', 'string', false, 'With a code: that one link (case-insensitive). Without: the list.'),
+      AUTHOR_SCOPE,
       param('limit', 'number', false, 'List only: 1–200, default 100.'),
       param('offset', 'number', false, 'List only: how many to skip, default 0.'),
     ],
@@ -63,11 +68,13 @@ export const METHOD_DOCS = {
     summary: 'Change where a short link goes, or its label. Printed codes follow immediately.',
     params: [
       param('code', 'string', true, 'The link to change.'),
+      AUTHOR_SCOPE,
       param('url', 'string', false, 'New destination (same rules as link.create).'),
       param('label', 'string', false, 'New label, up to 100 characters.'),
+      param('new_author', 'string', false, 'Admin only: give the link to this author. An author token gets 403.'),
     ],
     returns: 'The updated link.',
-    notes: 'Send at least one of url or label.',
+    notes: 'Send at least one of url, label or new_author.',
     example: { code: 'a', url: 'https://dancewithb.fun/check-in?events=…' },
   },
   'link.delete': {
@@ -81,7 +88,7 @@ export const METHOD_DOCS = {
     params: [
       param('name', 'string', true, '1–100 characters.'),
       param('text', 'string', true, 'What the code encodes, up to 4296 characters.'),
-      param('svg', 'string', true, 'A single <svg> document, up to 1.5 MB. Scripts, event handlers and links are rejected.'),
+      param('svg', 'string', true, 'A single <svg> document as the generator writes it, up to 1.5 MB: only svg/g/rect/circle/path elements with plain shape and colour attributes; anything else is rejected.'),
       param('details', 'string', false, 'Up to 2000 characters.'),
       param('author', 'string', false, 'Whose code this is, up to 200 characters (e.g. an email or project name).'),
       param('meta', 'object', false, 'Scores and generator settings, up to 16 KB as JSON.'),
@@ -127,22 +134,26 @@ export const METHOD_DOCS = {
   },
   'author.create': {
     summary: 'Authorize an author: creates their API token, limited to their own saved codes.',
-    params: [param('name', 'string', true, 'The author, 1–200 characters, exactly as on their saved codes (e.g. an email or project name). Must be unique.')],
-    returns: 'The author, including the token (status 201; 409 if the name exists).',
+    params: [param('name', 'string', true, 'The author, 1–200 characters, exactly as on their saved codes (e.g. an email or project name). Must be unique.'), ADOPT],
+    returns: 'The author, including the token (status 201; 409 if the name exists or is already on codes/links without adopt_existing).',
     example: { name: 'alex@example.com' },
   },
   'author.read': {
-    summary: 'Read one author with their token, or list all authors with their tokens.',
-    params: [param('name', 'string', false, 'With a name: that author. Without: all authors, by name.')],
-    returns: 'One author, or {authors: [author, …]}.',
+    summary: 'Read one author with their token, or list all authors.',
+    params: [
+      param('name', 'string', false, 'With a name: that author, including the token. Without: all authors, by name.'),
+      param('include_tokens', 'boolean', false, 'List only: include each author\'s token. Default false.'),
+    ],
+    returns: 'One author, or {authors: [author, …]} (tokens only with include_tokens).',
     example: { name: 'alex@example.com' },
   },
   'author.update': {
     summary: 'Rename an author (their saved codes move with them) and/or rotate their token.',
     params: [
       param('name', 'string', true, 'The author to change.'),
-      param('new_name', 'string', false, 'New name; their saved codes are relabelled to match.'),
+      param('new_name', 'string', false, 'New name; their saved codes and links are relabelled to match.'),
       param('rotate_token', 'boolean', false, 'true: issue a new token. The old one stops working at once.'),
+      ADOPT,
     ],
     returns: 'The updated author, including the (new) token.',
     notes: 'Send new_name and/or rotate_token: true.',
@@ -168,14 +179,14 @@ export const ERRORS = [
   { status: 403, meaning: 'The token is valid but may not do this (e.g. an author token calling link.create, naming another author, or setting new_author).' },
   { status: 404, meaning: 'Unknown method, or nothing with that code/id/name (for an author token, also another author\'s code).' },
   { status: 405, meaning: 'Wrong HTTP verb: writes are POST only; reads take GET or POST.' },
-  { status: 409, meaning: 'An author with that name already exists.' },
+  { status: 409, meaning: 'An author with that name already exists, or codes/links already carry the name (send adopt_existing: true).' },
   { status: 413, meaning: 'Request body too large.' },
   { status: 503, meaning: 'ADMIN_TOKEN is not configured: the API refuses everything.' },
 ];
 
 export const ROLE_DOCS = {
   admin: 'ADMIN_TOKEN (a Wrangler secret): everything, including the site\'s pages and managing authors.',
-  author: 'Author token ("qra_…", made with author.create): for other projects\' servers. Reads and repoints short links; lists, fetches, edits and deletes its own author\'s saved codes. Cannot create links or codes, delete links, move codes between authors, see other authors\' codes, or manage authors.',
+  author: 'Author token ("qra_…", made with author.create): for other projects\' servers. Reads and repoints its own author\'s short links; lists, fetches, edits and deletes its own author\'s saved codes. Cannot create links or codes, delete links, move anything between authors, reach other authors\' links or codes, or manage authors.',
 };
 
 /**

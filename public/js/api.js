@@ -2,11 +2,9 @@
 // itself stays behind the token) and renders it. Everything is built with
 // textContent; nothing from the response is parsed as HTML.
 
+import { api, getToken, bindSignIn } from './auth.js';
+
 const $ = (id) => document.getElementById(id);
-const store = (area) => { try { return window[area]; } catch { return null; } };
-let token = store('sessionStorage')?.getItem('adminToken') || store('localStorage')?.getItem('adminToken') || '';
-$('token').value = token;
-$('remember').checked = !!store('localStorage')?.getItem('adminToken');
 
 const setMsg = (text, kind = '') => { $('msg').textContent = text; $('msg').className = 'status ' + kind; };
 
@@ -144,36 +142,16 @@ function render(spec) {
 
 async function load() {
   $('spec').hidden = true;
-  if (!token) return setMsg('Enter your admin token to see the API specification.', 'warn');
+  if (!getToken()) return setMsg('Enter your admin token to see the API specification.', 'warn');
   try {
     setMsg('Loading…');
-    const res = await fetch('/api/spec.read', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: '{}',
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(res.status === 401 ? 'Wrong admin token.' : data.error || `Request failed (${res.status})`);
-    render(data);
+    render(await api('spec.read'));
     setMsg('');
   } catch (e) {
     setMsg(e.message, 'bad');
   }
 }
 
-$('signin').addEventListener('submit', (e) => {
-  e.preventDefault();
-  $('token').dispatchEvent(new Event('change'));
-});
-$('token').addEventListener('change', () => {
-  token = $('token').value.trim();
-  store('sessionStorage')?.setItem('adminToken', token);
-  if ($('remember').checked) store('localStorage')?.setItem('adminToken', token);
-  load();
-});
-$('remember').addEventListener('change', () => {
-  if ($('remember').checked) store('localStorage')?.setItem('adminToken', token);
-  else store('localStorage')?.removeItem('adminToken');
-});
 
+bindSignIn(() => load());
 load();

@@ -8,9 +8,10 @@
 // closest method: listing is a read without an id, the raw SVG is a read with
 // format "svg".
 //
-//   link.create  {url, label?}                                    admin
-//   link.read    {code} -> one link | {limit?, offset?} -> list    admin, author
-//   link.update  {code, url?, label?}                             admin, author
+//   link.create  {url, label?, author?}                           admin
+//   link.read    {code} -> one link | {author?, limit?, offset?} -> list
+//                                                                 admin, author*
+//   link.update  {code, url?, label?, new_author?}                admin, author*
 //   link.delete  {code}                                           admin
 //   qr.create    {name, text, svg, details?, author?, meta?, image?}  admin
 //   qr.read      {id, format?: "json"|"svg"} -> one design (with svg and logo)
@@ -18,11 +19,12 @@
 //   qr.update    {id, name?, details?, text + svg?, meta?, image?, new_author?}
 //                                                                 admin, author*
 //   qr.delete    {id}                                             admin, author*
-//   * an author token only ever sees its own author's designs; it can't create
-//     designs or move them to another author.
-//   author.create {name} -> the author with a new token            admin
-//   author.read   {name} -> one author | {} -> list (with tokens)  admin
-//   author.update {name, new_name?, rotate_token?}                 admin
+//   * an author token only ever sees its own author's links and designs; it
+//     can't create them or move them to another author.
+//   author.create {name, adopt_existing?} -> the author with a new token  admin
+//   author.read   {name} -> one author with token |
+//                 {include_tokens?} -> list                         admin
+//   author.update {name, new_name?, rotate_token?, adopt_existing?} admin
 //   author.delete {name}                                          admin
 //   spec.read    {} -> this API's specification (see spec.js)       admin
 //
@@ -131,12 +133,16 @@ async function authorize(request, env, ctx) {
   if (!given.startsWith('qra_')) return unauthorized();
   await ensureSchema(env.DB);
   const hash = await sha256Hex(given);
-  const row = await env.DB.prepare('SELECT name FROM authors WHERE token_hash = ?').bind(hash).first();
+  const row = await env.DB.prepare('SELECT name, last_used FROM authors WHERE token_hash = ?').bind(hash).first();
   if (!row) return unauthorized();
-  ctx?.waitUntil(
-    env.DB.prepare('UPDATE authors SET last_used = ? WHERE token_hash = ?').bind(Math.floor(Date.now() / 1000), hash).run()
-      .catch((e) => console.error('last_used update failed', e)),
-  );
+  // Record use at most hourly: a project polling the API shouldn't cost a write per request.
+  const now = Math.floor(Date.now() / 1000);
+  if (!row.last_used || now - row.last_used > 3600) {
+    ctx?.waitUntil(
+      env.DB.prepare('UPDATE authors SET last_used = ? WHERE token_hash = ?').bind(now, hash).run()
+        .catch((e) => console.error('last_used update failed', e)),
+    );
+  }
   return { role: 'author', author: row.name };
 }
 
@@ -161,7 +167,14 @@ class HttpError extends Error {
   }
 }
 
-function parseDestination(value, requestUrl) {
+/** Hosts our short links are served from: this request's, plus PUBLIC_BASE_URL's. */
+function shortLinkHosts(request, env) {
+  const hosts = new Set([new URL(request.url).host]);
+  if (env.PUBLIC_BASE_URL) { try { hosts.add(new URL(env.PUBLIC_BASE_URL).host); } catch { /* ignore */ } }
+  return hosts;
+}
+
+function parseDestination(value, hosts) {
   if (typeof value !== 'string') throw new HttpError(400, '"url" must be a string');
   const raw = value.trim();
   if (!raw || raw.length > MAX_URL_LENGTH) throw new HttpError(400, `"url" must be 1-${MAX_URL_LENGTH} characters`);
@@ -172,7 +185,7 @@ function parseDestination(value, requestUrl) {
     throw new HttpError(400, '"url" must be an absolute URL, e.g. https://example.com/page');
   }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new HttpError(400, '"url" must start with http:// or https://');
-  if (u.host === requestUrl.host && /^\/c(\/|$)/.test(u.pathname)) throw new HttpError(400, '"url" must not point back at a short link');
+  if (hosts.has(u.host) && /^\/c(\/|$)/i.test(u.pathname)) throw new HttpError(400, '"url" must not point back at a short link');
   return u.href;
 }
 
@@ -190,12 +203,48 @@ function parseText(value, field, max, { required = true } = {}) {
   return v;
 }
 
-/** Saved SVGs come from our own renderer; refuse anything that could carry script. */
-function parseSvg(value) {
+// Saved SVGs come from our own renderer (render.js toSVG), so only what it
+// writes is accepted: these elements and attributes, plain values, no text.
+// An allowlist, because blocklists miss tricks like <img/src/onerror=…>.
+const SVG_NUMBER = /^-?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/;
+const SVG_ELEMENTS = new Set(['svg', 'g', 'rect', 'circle', 'path']);
+const SVG_ATTRIBUTES = {
+  xmlns: /^http:\/\/www\.w3\.org\/2000\/svg$/,
+  viewBox: /^[-\d. ,e]+$/,
+  width: SVG_NUMBER, height: SVG_NUMBER, x: SVG_NUMBER, y: SVG_NUMBER, rx: SVG_NUMBER, ry: SVG_NUMBER,
+  cx: SVG_NUMBER, cy: SVG_NUMBER, r: SVG_NUMBER,
+  fill: /^(#[0-9a-fA-F]{3,8}|none)$/,
+  'fill-rule': /^(evenodd|nonzero)$/,
+  'shape-rendering': /^(auto|optimizeSpeed|crispEdges|geometricPrecision)$/,
+  d: /^[MmLlHhVvAaZz\d\s,.eE+-]*$/,
+};
+
+export function parseSvg(value) {
   if (typeof value !== 'string' || value.length > MAX_SVG_LENGTH) throw new HttpError(400, `"svg" must be a string of at most ${MAX_SVG_LENGTH} characters`);
   const v = value.trim();
-  if (!/^<svg[\s>]/i.test(v) || !/<\/svg>$/i.test(v)) throw new HttpError(400, '"svg" must be a single <svg> document');
-  if (/<script|<foreignObject|\son[a-z]+\s*=|javascript:|<!ENTITY|xlink:href|\shref\s*=/i.test(v)) throw new HttpError(400, '"svg" contains disallowed content');
+  const bad = (why) => new HttpError(400, `"svg" ${why}`);
+  const tag = /\s*<(\/?)([A-Za-z][\w-]*)((?:\s+[\w:-]+="[^"]*")*)\s*(\/?)>/y;
+  const stack = [];
+  let roots = 0;
+  for (let i = 0; i < v.length;) {
+    tag.lastIndex = i;
+    const m = tag.exec(v);
+    if (!m) throw bad('may only contain the shapes the generator draws');
+    i = tag.lastIndex;
+    const [, close, name, attrs, selfClose] = m;
+    if (!SVG_ELEMENTS.has(name)) throw bad(`must not contain <${name}>`);
+    if (close) {
+      if (attrs || selfClose || stack.pop() !== name) throw bad('has mismatched tags');
+      continue;
+    }
+    if (!stack.length && (name !== 'svg' || roots++)) throw bad('must be a single <svg> document');
+    if (stack.length && name === 'svg') throw bad('must not nest <svg>');
+    for (const [, key, val] of attrs.matchAll(/\s+([\w:-]+)="([^"]*)"/g)) {
+      if (!Object.hasOwn(SVG_ATTRIBUTES, key) || !SVG_ATTRIBUTES[key].test(val)) throw bad(`must not use the attribute ${key}="${val.slice(0, 40)}"`);
+    }
+    if (!selfClose) stack.push(name);
+  }
+  if (stack.length || !roots) throw bad('must be a single, complete <svg> document');
   return v;
 }
 
@@ -219,8 +268,7 @@ function parseMeta(value) {
 function linkIdFor(text, request, env) {
   let u;
   try { u = new URL(text); } catch { return null; }
-  const hosts = new Set([new URL(request.url).host]);
-  if (env.PUBLIC_BASE_URL) { try { hosts.add(new URL(env.PUBLIC_BASE_URL).host); } catch { /* ignore */ } }
+  const hosts = shortLinkHosts(request, env);
   const m = /^\/c\/([A-Za-z0-9]+)\/?$/.exec(u.pathname);
   return m && hosts.has(u.host) ? decodeCode(m[1].toLowerCase()) : null;
 }
@@ -258,6 +306,7 @@ function ensureSchema(db) {
     // Added later: tables created before them get the columns here.
     .then(() => addColumn(db, 'designs', 'image TEXT'))
     .then(() => addColumn(db, 'designs', "author TEXT NOT NULL DEFAULT ''"))
+    .then(() => addColumn(db, 'links', "author TEXT NOT NULL DEFAULT ''"))
     // Authors who may use the API, each with their own token. The token is kept
     // (not just its hash) because the admin wants to view it again later.
     .then(() => db.prepare(
@@ -295,6 +344,7 @@ function present(row, base) {
     short: `${base}/c/${code}`,
     url: row.url,
     label: row.label,
+    author: row.author ?? '',
     hits: row.hits ?? 0,
     created_at: row.created_at,
     last_hit: row.last_hit ?? null,
@@ -349,7 +399,7 @@ async function redirect(request, env, ctx, rawCode) {
 // ---------------------------------------------------------------- API methods
 
 const DESIGN_COLUMNS = 'd.id, d.name, d.details, d.author, d.text, d.link_id, d.meta, d.created_at, l.url AS link_url';
-const LINK_COLUMNS = 'id, url, label, created_at, hits, last_hit';
+const LINK_COLUMNS = 'id, url, label, author, created_at, hits, last_hit';
 
 function parsePage(p) {
   return {
@@ -384,21 +434,40 @@ function authorScope(p, who) {
   return p.author === undefined ? null : parseText(p.author, 'author', MAX_AUTHOR_LENGTH, { required: false });
 }
 
-function presentAuthor(row) {
+function presentAuthor(row, withToken = true) {
   return {
     name: row.name,
-    token: row.token,
+    ...(withToken ? { token: row.token } : {}),
     created_at: row.created_at,
     last_used: row.last_used ?? null,
     codes: row.codes ?? 0,
+    links: row.links ?? 0,
   };
 }
 
-const AUTHOR_SELECT = 'SELECT a.name, a.token, a.created_at, a.last_used, (SELECT COUNT(*) FROM designs d WHERE d.author = a.name) AS codes FROM authors a';
+const AUTHOR_SELECT = 'SELECT a.name, a.token, a.created_at, a.last_used, (SELECT COUNT(*) FROM designs d WHERE d.author = a.name) AS codes, (SELECT COUNT(*) FROM links l WHERE l.author = a.name) AS links FROM authors a';
 const parseAuthorName = (v, field = 'name') => parseText(v, field, MAX_AUTHOR_LENGTH);
+
+/**
+ * Refuse to give an author's token codes or links already labelled with that
+ * name (left by a revoked author, or typed in the generator) unless the admin
+ * says so with adopt_existing: true.
+ */
+async function guardAdoption(env, name, p) {
+  if (p.adopt_existing !== undefined && typeof p.adopt_existing !== 'boolean') throw new HttpError(400, '"adopt_existing" must be true or false');
+  if (p.adopt_existing) return;
+  const { codes, links } = await env.DB.prepare(
+    'SELECT (SELECT COUNT(*) FROM designs WHERE author = ?1) AS codes, (SELECT COUNT(*) FROM links WHERE author = ?1) AS links',
+  ).bind(name).first();
+  if (codes || links) {
+    throw new HttpError(409, `${codes} saved code(s) and ${links} link(s) are already labelled "${name}". Send "adopt_existing": true to give them to this author's token.`);
+  }
+}
 
 const authorCreate = async ({ env, p }) => {
   const name = parseAuthorName(p.name);
+  if (await env.DB.prepare('SELECT 1 FROM authors WHERE name = ?').bind(name).first()) throw new HttpError(409, `An author named "${name}" already exists`);
+  await guardAdoption(env, name, p);
   const token = newAuthorToken();
   try {
     await env.DB.prepare('INSERT INTO authors (name, token, token_hash, created_at) VALUES (?, ?, ?, ?)')
@@ -416,8 +485,11 @@ const authorRead = async ({ env, p }) => {
     const row = await env.DB.prepare(`${AUTHOR_SELECT} WHERE a.name = ?`).bind(parseAuthorName(p.name)).first();
     return row ? json(presentAuthor(row)) : json({ error: 'Not found' }, 404);
   }
+  // Tokens only on request, so a page that just needs names doesn't receive them.
+  if (p.include_tokens !== undefined && ![true, false, 'true', 'false'].includes(p.include_tokens)) throw new HttpError(400, '"include_tokens" must be true or false');
+  const withTokens = p.include_tokens === true || p.include_tokens === 'true';
   const { results } = await env.DB.prepare(`${AUTHOR_SELECT} ORDER BY a.name COLLATE NOCASE`).all();
-  return json({ authors: results.map(presentAuthor) });
+  return json({ authors: results.map((r) => presentAuthor(r, withTokens)) });
 };
 
 const authorUpdate = async ({ env, p }) => {
@@ -426,15 +498,20 @@ const authorUpdate = async ({ env, p }) => {
   const newName = p.new_name === undefined ? name : parseAuthorName(p.new_name, 'new_name');
   if (p.rotate_token !== undefined && typeof p.rotate_token !== 'boolean') throw new HttpError(400, '"rotate_token" must be true or false');
   if (newName === name && !p.rotate_token) throw new HttpError(400, 'Nothing to update: send "new_name" and/or "rotate_token": true');
+  if (newName !== name) {
+    if (await env.DB.prepare('SELECT 1 FROM authors WHERE name = ?').bind(newName).first()) throw new HttpError(409, `An author named "${newName}" already exists`);
+    await guardAdoption(env, newName, p);
+  }
   const stmts = [];
   if (p.rotate_token) {
     const token = newAuthorToken();
     stmts.push(env.DB.prepare('UPDATE authors SET token = ?, token_hash = ?, last_used = NULL WHERE name = ?').bind(token, await sha256Hex(token), name));
   }
   if (newName !== name) {
-    // The author's codes move with the rename, so the token keeps reaching them.
+    // The author's codes and links move with the rename, so the token keeps reaching them.
     stmts.push(env.DB.prepare('UPDATE authors SET name = ? WHERE name = ?').bind(newName, name));
     stmts.push(env.DB.prepare('UPDATE designs SET author = ? WHERE author = ?').bind(newName, name));
+    stmts.push(env.DB.prepare('UPDATE links SET author = ? WHERE author = ?').bind(newName, name));
   }
   try {
     await env.DB.batch(stmts);
@@ -452,31 +529,46 @@ const authorDelete = async ({ env, p }) => {
   return res.meta?.changes ? json({ deleted: name }) : json({ error: 'Not found' }, 404);
 };
 
-const linkCreate = async ({ env, url, base, p }) => {
-  const row = await env.DB.prepare(`INSERT INTO links (url, label, created_at) VALUES (?, ?, ?) RETURNING ${LINK_COLUMNS}`)
-    .bind(parseDestination(p.url, url), parseLabel(p.label), Math.floor(Date.now() / 1000))
+/** SQL to limit a query to one author (or nothing, for all). */
+const authorWhere = (author, column = 'author') => (author === null ? ['', []] : [` AND ${column} = ?`, [author]]);
+
+const linkCreate = async ({ req, env, base, p }) => {
+  const row = await env.DB.prepare(`INSERT INTO links (url, label, author, created_at) VALUES (?, ?, ?, ?) RETURNING ${LINK_COLUMNS}`)
+    .bind(
+      parseDestination(p.url, shortLinkHosts(req, env)), parseLabel(p.label),
+      parseText(p.author, 'author', MAX_AUTHOR_LENGTH, { required: false }), Math.floor(Date.now() / 1000),
+    )
     .first();
   return json(present(row, base), 201);
 };
 
-const linkRead = async ({ env, base, p }) => {
+// Links belong to an author like designs do: an author token only reaches its own.
+const linkRead = async ({ env, base, p, who }) => {
+  const [scope, scopeArgs] = authorWhere(authorScope(p, who));
   if (p.code !== undefined) {
-    const row = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE id = ?`).bind(parseLinkCode(p.code)).first();
+    const row = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE id = ?${scope}`).bind(parseLinkCode(p.code), ...scopeArgs).first();
     return row ? json(present(row, base)) : json({ error: 'Not found' }, 404);
   }
   const { limit, offset } = parsePage(p);
-  const { results } = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links ORDER BY id DESC LIMIT ? OFFSET ?`).bind(limit, offset).all();
+  const { results } = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE 1 = 1${scope} ORDER BY id DESC LIMIT ? OFFSET ?`)
+    .bind(...scopeArgs, limit, offset)
+    .all();
   return json({ links: results.map((r) => present(r, base)) });
 };
 
-const linkUpdate = async ({ env, url, base, p }) => {
+const linkUpdate = async ({ req, env, base, p, who }) => {
+  const [scope, scopeArgs] = authorWhere(authorScope(p, who));
   const id = parseLinkCode(p.code);
   const sets = [];
   const args = [];
-  if (p.url !== undefined) { sets.push('url = ?'); args.push(parseDestination(p.url, url)); }
+  if (p.url !== undefined) { sets.push('url = ?'); args.push(parseDestination(p.url, shortLinkHosts(req, env))); }
   if (p.label !== undefined) { sets.push('label = ?'); args.push(parseLabel(p.label)); }
-  if (!sets.length) throw new HttpError(400, 'Nothing to update: send "url" and/or "label"');
-  const row = await env.DB.prepare(`UPDATE links SET ${sets.join(', ')} WHERE id = ? RETURNING ${LINK_COLUMNS}`).bind(...args, id).first();
+  if (p.new_author !== undefined) {
+    if (who.role === 'author') throw new HttpError(403, 'An author token cannot change a link\'s author');
+    sets.push('author = ?'); args.push(parseText(p.new_author, 'new_author', MAX_AUTHOR_LENGTH, { required: false }));
+  }
+  if (!sets.length) throw new HttpError(400, 'Nothing to update: send "url", "label" and/or "new_author"');
+  const row = await env.DB.prepare(`UPDATE links SET ${sets.join(', ')} WHERE id = ?${scope} RETURNING ${LINK_COLUMNS}`).bind(...args, id, ...scopeArgs).first();
   return row ? json(present(row, base)) : json({ error: 'Not found' }, 404);
 };
 

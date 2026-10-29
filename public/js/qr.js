@@ -43,7 +43,8 @@ export function numDataCodewords(ver, ecl) {
 export const eccPerBlock = (ver, ecl) => ECC_PER_BLOCK[ecl][ver];
 export const numBlocks = (ver, ecl) => NUM_BLOCKS[ecl][ver];
 
-const charCountBits = (ver) => (ver <= 9 ? 8 : 16);
+/** Byte-mode character-count field width. */
+export const charCountBits = (ver) => (ver <= 9 ? 8 : 16);
 
 /** Smallest version >= minVersion whose byte-mode capacity fits `byteLen` bytes, or -1. */
 export function pickVersion(byteLen, ecl, minVersion = 1) {
@@ -141,15 +142,10 @@ export function getLayout(version, ecl) {
   finder(size - 4, 3);
   finder(3, size - 4);
 
-  const alignPos = alignmentPositions(version);
-  const n = alignPos.length;
-  for (let i = 0; i < n; i++)
-    for (let j = 0; j < n; j++) {
-      if ((i === 0 && j === 0) || (i === 0 && j === n - 1) || (i === n - 1 && j === 0)) continue;
-      for (let dy = -2; dy <= 2; dy++)
-        for (let dx = -2; dx <= 2; dx++)
-          setFn(alignPos[i] + dx, alignPos[j] + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
-    }
+  for (const [cx, cy] of alignmentCentres(version))
+    for (let dy = -2; dy <= 2; dy++)
+      for (let dx = -2; dx <= 2; dx++)
+        setFn(cx + dx, cy + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
 
   // Reserve format areas (values written per mask later)
   for (let i = 0; i <= 5; i++) setFn(8, i, false);
@@ -221,7 +217,16 @@ export function getLayout(version, ecl) {
   return L;
 }
 
-export function alignmentPositions(ver) {
+/** Centres [x, y] of the 5x5 alignment patterns (the three finder corners have none). */
+export function alignmentCentres(ver) {
+  const pos = alignmentPositions(ver), n = pos.length, out = [];
+  for (let i = 0; i < n; i++)
+    for (let j = 0; j < n; j++)
+      if (!((i === 0 && j === 0) || (i === 0 && j === n - 1) || (i === n - 1 && j === 0))) out.push([pos[i], pos[j]]);
+  return out;
+}
+
+function alignmentPositions(ver) {
   if (ver === 1) return [];
   const n = Math.floor(ver / 7) + 2;
   const size = sizeOf(ver);
@@ -303,6 +308,8 @@ export function applyFormat(matrix, layout, mask) {
   set(8, size - 8, 1);
 }
 
+const FINDER_LIKE = [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0];
+
 /** Standard QR penalty score (lower is better); used to pick a mask. */
 export function penaltyScore(m, size) {
   let score = 0;
@@ -321,11 +328,14 @@ export function penaltyScore(m, size) {
         prev = v;
       }
       // finder-like 1:1:3:1:1 patterns with 4 light modules on either side
-      const line = [];
-      for (let b = 0; b < size; b++) line.push(pass ? at(a, b) : at(b, a));
       for (let b = 0; b + 11 <= size; b++) {
-        const w = line.slice(b, b + 11).join('');
-        if (w === '10111010000' || w === '00001011101') score += 40;
+        let fwd = true, back = true;
+        for (let k = 0; k < 11 && (fwd || back); k++) {
+          const v = pass ? at(a, b + k) : at(b + k, a);
+          if (v !== FINDER_LIKE[k]) fwd = false;
+          if (v !== FINDER_LIKE[10 - k]) back = false;
+        }
+        if (fwd || back) score += 40;
       }
     }
   }

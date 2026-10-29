@@ -1,25 +1,11 @@
 // Authors page: create, view, copy, rotate and revoke author API tokens
 // (author.* methods, admin only), and view/copy this browser's admin token.
 
+import { api, getToken, bindSignIn } from './auth.js';
+
 const $ = (id) => document.getElementById(id);
-const store = (area) => { try { return window[area]; } catch { return null; } };
-let token = store('sessionStorage')?.getItem('adminToken') || store('localStorage')?.getItem('adminToken') || '';
-$('token').value = token;
-$('remember').checked = !!store('localStorage')?.getItem('adminToken');
 
 const setMsg = (text, kind = '') => { $('msg').textContent = text; $('msg').className = 'status ' + kind; };
-
-/** Calls an API method, e.g. api('author.create', { name }) (see src/worker.js). */
-async function api(method, params = {}) {
-  const res = await fetch(`/api/${method}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(res.status === 401 ? 'Wrong admin token.' : data.error || `Request failed (${res.status})`);
-  return data;
-}
 
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -57,10 +43,10 @@ function render(authors) {
       button('Show', (b) => { visible = !visible; shown.textContent = visible ? a.token : mask(a.token); b.textContent = visible ? 'Hide' : 'Show'; }),
       ' ',
       button('Copy', () => copy(a.token, `Copied ${a.name}'s token.`)));
-    const codes = el('a', null, String(a.codes));
+    const codes = el('a', null, `${a.codes} code${a.codes === 1 ? '' : 's'}`);
     codes.href = `saved.html?author=${encodeURIComponent(a.name)}`;
     const codesCell = el('td');
-    codesCell.append(codes);
+    codesCell.append(codes, `, ${a.links} link${a.links === 1 ? '' : 's'}`);
     const actions = el('td', 'row');
     actions.append(
       button('Rotate', async () => {
@@ -71,7 +57,14 @@ function render(authors) {
       button('Rename', async () => {
         const next = prompt('New name (their saved codes are relabelled too):', a.name);
         if (next === null || next.trim() === a.name) return;
-        await api('author.update', { name: a.name, new_name: next });
+        try {
+          await api('author.update', { name: a.name, new_name: next });
+        } catch (e) {
+          if (!/adopt_existing/.test(e.message) || !confirm(`${e.message.replace(/ Send.*$/, '')}
+
+Give them to ${next.trim()}?`)) throw e;
+          await api('author.update', { name: a.name, new_name: next, adopt_existing: true });
+        }
         await load(`Renamed to ${next.trim()}.`);
       }),
       button('Revoke', async () => {
@@ -87,9 +80,9 @@ function render(authors) {
 }
 
 async function load(done = '') {
-  if (!token) { $('table').hidden = true; return setMsg('Enter your admin token to manage authors.', 'warn'); }
+  if (!getToken()) { $('table').hidden = true; return setMsg('Enter your admin token to manage authors.', 'warn'); }
   try {
-    const { authors } = await api('author.read');
+    const { authors } = await api('author.read', { include_tokens: true });
     render(authors);
     setMsg(done || (authors.length ? '' : 'No authors yet. Add one above to give them an API token.'), done ? 'ok' : '');
   } catch (e) {
@@ -102,7 +95,15 @@ $('create').addEventListener('click', async () => {
   const name = $('newName').value.trim();
   if (!name) return setMsg('Enter the author\'s name first.', 'warn');
   try {
-    const a = await api('author.create', { name });
+    let a;
+    try {
+      a = await api('author.create', { name });
+    } catch (e) {
+      if (!/adopt_existing/.test(e.message) || !confirm(`${e.message.replace(/ Send.*$/, '')}
+
+Give them to ${name}'s new token?`)) throw e;
+      a = await api('author.create', { name, adopt_existing: true });
+    }
     $('newName').value = '';
     await load(`Created a token for ${a.name}. You can view or copy it below at any time.`);
   } catch (e) {
@@ -121,20 +122,7 @@ $('copyAdmin').addEventListener('click', () => {
   copy($('token').value, 'Admin token copied.');
 });
 
-$('signin').addEventListener('submit', (e) => {
-  e.preventDefault();
-  $('token').dispatchEvent(new Event('change'));
-});
-$('token').addEventListener('change', () => {
-  token = $('token').value.trim();
-  store('sessionStorage')?.setItem('adminToken', token);
-  if ($('remember').checked) store('localStorage')?.setItem('adminToken', token);
-  load();
-});
-$('remember').addEventListener('change', () => {
-  if ($('remember').checked) store('localStorage')?.setItem('adminToken', token);
-  else store('localStorage')?.removeItem('adminToken');
-});
 $('refresh').addEventListener('click', () => load());
 
+bindSignIn(() => load());
 load();

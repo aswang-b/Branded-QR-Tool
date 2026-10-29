@@ -28,7 +28,8 @@ export function variants(link, { minVersion = 1 } = {}) {
   for (const ecl of ECLS) {
     const base = fragment ? pickFragmentVersion(link, ecl, minVersion, 8) : pickVersion(bytes, ecl, minVersion);
     if (base < 0) continue;
-    for (const [grid, version] of [['Compact', base], ['Detailed', detailedVersion(base)]]) {
+    const grids = [['Compact', base], ['Detailed', detailedVersion(base)]].filter(([, v], i) => i === 0 || v !== base);
+    for (const [grid, version] of grids) {
       for (const s of STRENGTHS) out.push({ ecl, version, grid, strength: s.value, strengthLabel: s.label, fragment });
     }
   }

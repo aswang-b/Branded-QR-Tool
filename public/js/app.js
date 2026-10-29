@@ -1,6 +1,7 @@
 import { toSVG, drawCanvas } from './render.js';
 import { rateAtPrint } from './verify.js';
 import { luminance } from './art.js';
+import { api, store, getToken, setToken, bindSignIn } from './auth.js';
 
 const $ = (id) => document.getElementById(id);
 const hexToRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
@@ -21,24 +22,6 @@ let jobId = 0;
 let candidates = [];
 let selected = null;
 let lastPrint = { mm: 20, distanceMm: 150 };
-
-// ------------------------------------------------------------------ admin token (shared with links/saved pages)
-
-const store = (area) => { try { return window[area]; } catch { return null; } };
-const getToken = () => store('sessionStorage')?.getItem('adminToken') || store('localStorage')?.getItem('adminToken') || '';
-const setToken = (t) => store('sessionStorage')?.setItem('adminToken', t);
-
-/** Calls an API method, e.g. api('link.update', { code, url }) (see src/worker.js). */
-async function api(method, params = {}) {
-  const res = await fetch(`/api/${method}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(res.status === 401 ? 'Wrong or missing admin token.' : data.error || `Request failed (${res.status})`);
-  return data;
-}
 
 // ------------------------------------------------------------------ image handling
 
@@ -197,8 +180,9 @@ function generate() {
   if (!req.link) return setNote('Enter a link first.');
   lastSettings = readSettings();
   lastLogo = logoDataUrl();
-  worker?.terminate();
-  worker = new Worker(new URL('./gen-worker.js', import.meta.url), { type: 'module' });
+  // One long-lived worker keeps the scan decoders (WebAssembly) loaded between
+  // runs; a new job supersedes the running one, and stale messages are ignored.
+  worker ??= new Worker(new URL('./gen-worker.js', import.meta.url), { type: 'module' });
   const my = ++jobId;
   candidates = [];
   selected = null;
@@ -227,6 +211,8 @@ function generate() {
     }
   };
   worker.onerror = (e) => {
+    worker?.terminate();
+    worker = null; // start afresh next time
     $('generate').disabled = false;
     $('generate').textContent = 'Generate designs';
     $('progressWrap').hidden = true;
@@ -363,7 +349,7 @@ function select(c) {
   table.append(head, body);
   $('detailText').textContent = c.text;
   $('saveMsg').textContent = '';
-  $('saveToken').hidden = !!getToken();
+  $('signin').hidden = !!getToken();
 }
 
 // ------------------------------------------------------------------ export & save
@@ -400,9 +386,10 @@ async function save(e) {
   const replace = editing && e.submitter?.value === 'replace';
   const msg = $('saveMsg');
   if (!getToken()) {
-    const t = $('saveToken').value.trim();
-    if (!t) { $('saveToken').hidden = false; $('saveToken').focus(); msg.textContent = 'Enter your admin token to save.'; return; }
-    setToken(t);
+    $('signin').hidden = false;
+    $('token').focus();
+    msg.textContent = 'Sign in with your admin token first.';
+    return;
   }
   const c = selected;
   try {
@@ -426,22 +413,22 @@ async function save(e) {
     });
     msg.innerHTML = `${replace ? 'Replaced' : 'Saved'}. <a href="saved.html">See saved codes</a>`;
     if (replace) setEditing({ id: saved.id, name: saved.name });
-    $('saveToken').hidden = true;
   } catch (err) {
     msg.textContent = err.message;
-    if (/token/i.test(err.message)) { store('sessionStorage')?.removeItem('adminToken'); $('saveToken').hidden = false; }
+    if (err.status === 401) { $('token').value = ''; $('signin').hidden = false; }
   }
 }
 
 async function shorten() {
   const link = $('text').value.trim();
-  if (!/^https?:\/\//i.test(link)) return setNote('Enter a full http(s) link to shorten.');
-  if (/\/c\/[A-Za-z0-9]+\/?$/.test(new URL(link, location.href).pathname)) return setNote('That already looks like a short link.');
-  let token = getToken();
-  if (!token) {
-    token = prompt('Admin token (to create a short link):') || '';
+  let parsed;
+  try { parsed = /^https?:\/\//i.test(link) ? new URL(link) : null; } catch { parsed = null; }
+  if (!parsed) return setNote('Enter a full, valid http(s) link to shorten, e.g. https://dancewithb.fun/check-in.');
+  if (/\/c\/[A-Za-z0-9]+\/?$/.test(parsed.pathname)) return setNote('That already looks like a short link.');
+  if (!getToken()) {
+    const token = (prompt('Admin token (to create a short link):') || '').trim();
     if (!token) return;
-    setToken(token.trim());
+    setToken(token);
   }
   try {
     const l = await api('link.create', { url: link });
@@ -496,9 +483,9 @@ function setEditing(d) {
 /** Open a saved code in the editor: same link, logo and settings, then generate. */
 async function loadForEdit(id) {
   if (!getToken()) {
-    const t = prompt('Admin token (to open a saved code):') || '';
-    if (!t.trim()) return setNote('Enter your admin token to edit a saved code.');
-    setToken(t.trim());
+    const t = (prompt('Admin token (to open a saved code):') || '').trim();
+    if (!t) return setNote('Enter your admin token to edit a saved code.');
+    setToken(t);
   }
   let d;
   try {
@@ -534,11 +521,19 @@ checkColors();
 setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'dancewithb.fun logo');
 $('saveAuthor').value = store('localStorage')?.getItem('qrAuthor') || '';
 // Suggest authorized authors (see Authors) in the save form's Author field.
-if (getToken()) {
+// author.read without include_tokens returns names, never tokens.
+function loadAuthorSuggestions() {
+  if (!getToken()) return;
   api('author.read').then(({ authors }) => {
     $('authorList').replaceChildren(...authors.map((a) => Object.assign(document.createElement('option'), { value: a.name })));
   }).catch(() => { /* suggestions only */ });
 }
+loadAuthorSuggestions();
+bindSignIn(() => {
+  $('signin').hidden = true;
+  $('saveMsg').textContent = 'Signed in. Press Save.';
+  loadAuthorSuggestions();
+});
 if (params.get('edit')) loadForEdit(params.get('edit'));
 
 // The settings column scrolls on its own (desktop layout); size it to the

@@ -1,25 +1,11 @@
+import { api, getToken, bindSignIn } from './auth.js';
+
 const $ = (id) => document.getElementById(id);
 
-const store = (area) => { try { return window[area]; } catch { return null; } };
-let token = store('sessionStorage')?.getItem('adminToken') || store('localStorage')?.getItem('adminToken') || '';
-$('token').value = token;
-$('remember').checked = !!store('localStorage')?.getItem('adminToken');
 
 function setMsg(text, kind = '') {
   $('msg').textContent = text;
   $('msg').className = 'status ' + kind;
-}
-
-/** Calls an API method, e.g. api('link.update', { code, url }) (see src/worker.js). */
-async function api(method, params = {}) {
-  const res = await fetch(`/api/${method}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(res.status === 401 ? 'Wrong admin token.' : data.error || `Request failed (${res.status})`);
-  return data;
 }
 
 const cell = (text, cls) => {
@@ -74,12 +60,17 @@ function render(links) {
         if (next === null || next.trim() === l.url) return;
         try { await api('link.update', { code: l.code, url: next }); await load(); } catch (e) { setMsg(e.message, 'bad'); }
       }),
+      button('Author', async () => {
+        const next = prompt(`Which author owns /c/${l.code}? Their API token can read and repoint it. Leave empty for none.`, l.author || '');
+        if (next === null || next.trim() === (l.author || '')) return;
+        try { await api('link.update', { code: l.code, new_author: next.trim() }); await load(); } catch (e) { setMsg(e.message, 'bad'); }
+      }),
       button('Delete', async () => {
         if (!confirm(`Delete /c/${l.code}? Printed codes will stop working and the code is never reused.`)) return;
         try { await api('link.delete', { code: l.code }); await load(); } catch (e) { setMsg(e.message, 'bad'); }
       }),
     );
-    tr.append(code, dest, cell(String(l.hits), 'num'), cell(new Date(l.created_at * 1000).toLocaleDateString()), actions);
+    tr.append(code, dest, cell(l.author || '—'), cell(String(l.hits), 'num'), cell(new Date(l.created_at * 1000).toLocaleDateString()), actions);
     rows.append(tr);
   }
   $('table').hidden = links.length === 0;
@@ -87,7 +78,7 @@ function render(links) {
 }
 
 async function load() {
-  if (!token) return setMsg('Enter your admin token to manage links.', 'warn');
+  if (!getToken()) return setMsg('Enter your admin token to manage links.', 'warn');
   try {
     setMsg('Loading…');
     render((await api('link.read', { limit: 200 })).links);
@@ -97,28 +88,14 @@ async function load() {
   }
 }
 
-$('signin').addEventListener('submit', (e) => {
-  e.preventDefault();
-  $('token').dispatchEvent(new Event('change'));
-});
-$('token').addEventListener('change', () => {
-  token = $('token').value.trim();
-  store('sessionStorage')?.setItem('adminToken', token);
-  if ($('remember').checked) store('localStorage')?.setItem('adminToken', token);
-  load();
-});
-$('remember').addEventListener('change', () => {
-  if ($('remember').checked) store('localStorage')?.setItem('adminToken', token);
-  else store('localStorage')?.removeItem('adminToken');
-});
 $('refresh').addEventListener('click', load);
 
 $('create').addEventListener('click', async () => {
   const box = $('created');
   box.hidden = true;
-  if (!token) return setMsg('Enter your admin token first.', 'warn');
+  if (!getToken()) return setMsg('Enter your admin token first.', 'warn');
   try {
-    const l = await api('link.create', { url: $('dest').value, label: $('label').value || undefined });
+    const l = await api('link.create', { url: $('dest').value, label: $('label').value || undefined, author: $('author').value.trim() || undefined });
     box.hidden = false;
     box.replaceChildren();
     const strong = document.createElement('strong');
@@ -136,4 +113,11 @@ $('create').addEventListener('click', async () => {
   }
 });
 
+// Suggest authorized authors (names only) in the Author field.
+const loadAuthors = () => getToken() && api('author.read').then(({ authors }) => {
+  $('authorList').replaceChildren(...authors.map((a) => Object.assign(document.createElement('option'), { value: a.name })));
+}).catch(() => { /* suggestions only */ });
+
+bindSignIn(() => { load(); loadAuthors(); });
+loadAuthors();
 load();

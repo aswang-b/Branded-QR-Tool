@@ -1,24 +1,10 @@
+import { api, apiText, getToken, bindSignIn } from './auth.js';
+
 const $ = (id) => document.getElementById(id);
 const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
 
-const store = (area) => { try { return window[area]; } catch { return null; } };
-let token = store('sessionStorage')?.getItem('adminToken') || store('localStorage')?.getItem('adminToken') || '';
-$('token').value = token;
-$('remember').checked = !!store('localStorage')?.getItem('adminToken');
 
 const setMsg = (text, kind = '') => { $('msg').textContent = text; $('msg').className = 'status ' + kind; };
-
-/** Calls an API method, e.g. api('link.update', { code, url }) (see src/worker.js). */
-async function api(method, params = {}) {
-  const res = await fetch(`/api/${method}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(res.status === 401 ? 'Wrong admin token.' : data.error || `Request failed (${res.status})`);
-  return data;
-}
 
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -68,7 +54,20 @@ async function copy(text, done) {
   }
 }
 
+// Thumbnails load as their cards come into view, a few screens ahead at most
+// (all at once where IntersectionObserver is missing).
+const thumbs = 'IntersectionObserver' in window
+  ? new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      thumbs.unobserve(e.target);
+      e.target._load?.();
+    }
+  }, { rootMargin: '600px 0px' })
+  : { observe: (img) => queueMicrotask(() => img._load?.()), unobserve() {}, disconnect() {} };
+
 function render(designs) {
+  thumbs.disconnect();
   const list = $('list');
   list.replaceChildren();
   for (const d of designs) {
@@ -93,8 +92,15 @@ function render(designs) {
     info.append(facts, el('p', 'hint mono', d.text));
 
     let svg = null;
-    const getSvg = async () => (svg ??= (await api('qr.read', { id: d.id })).svg);
-    getSvg().then((s) => { img.src = URL.createObjectURL(new Blob([s], { type: 'image/svg+xml' })); }).catch(() => {});
+    // Just the SVG (not the stored logo), fetched once the card scrolls into view.
+    const getSvg = async () => (svg ??= await apiText('qr.read', { id: d.id, format: 'svg' }));
+    thumbs.observe(img);
+    img._load = () => getSvg().then((s) => {
+      const url = URL.createObjectURL(new Blob([s], { type: 'image/svg+xml' }));
+      img.addEventListener('load', () => URL.revokeObjectURL(url), { once: true });
+      img.addEventListener('error', () => URL.revokeObjectURL(url), { once: true });
+      img.src = url;
+    }).catch(() => {});
 
     const actions = el('div', 'actions');
     const btn = (label, fn, cls = '') => {
@@ -124,7 +130,7 @@ function render(designs) {
 }
 
 async function load() {
-  if (!token) return setMsg('Enter your admin token to see saved codes.', 'warn');
+  if (!getToken()) return setMsg('Enter your admin token to see saved codes.', 'warn');
   try {
     setMsg('Loading…');
     const author = $('author').value.trim();
@@ -135,16 +141,6 @@ async function load() {
   }
 }
 
-$('signin').addEventListener('submit', (e) => {
-  e.preventDefault();
-  $('token').dispatchEvent(new Event('change'));
-});
-$('token').addEventListener('change', () => {
-  token = $('token').value.trim();
-  store('sessionStorage')?.setItem('adminToken', token);
-  if ($('remember').checked) store('localStorage')?.setItem('adminToken', token);
-  load();
-});
 $('author').value = new URLSearchParams(location.search).get('author') || '';
 $('author').addEventListener('change', () => {
   const u = new URL(location.href);
@@ -152,9 +148,6 @@ $('author').addEventListener('change', () => {
   history.replaceState(null, '', u);
   load();
 });
-$('remember').addEventListener('change', () => {
-  if ($('remember').checked) store('localStorage')?.setItem('adminToken', token);
-  else store('localStorage')?.removeItem('adminToken');
-});
 
+bindSignIn(() => load());
 load();

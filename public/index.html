@@ -149,14 +149,21 @@
                 <option value="4096">4096 px</option>
               </select>
             </div>
+            <h3 class="save-title">Save this code</h3>
+            <form class="field signin-inline" id="signin" method="post" action="#" hidden>
+              <label for="token">Admin token <span class="muted">(needed to save)</span></label>
+              <input type="text" name="username" value="admin" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">
+              <div class="row nowrap">
+                <input id="token" name="password" type="password" autocomplete="current-password" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
+                <button type="submit" class="small">Sign in</button>
+              </div>
+              <label class="check"><input id="remember" type="checkbox"> Remember on this device</label>
+            </form>
             <form id="saveForm" class="save">
-              <h3>Save this code</h3>
               <input id="saveName" type="text" maxlength="100" placeholder="Name, e.g. Class check-in sticker" required>
               <textarea id="saveDetails" maxlength="2000" rows="2" placeholder="Details (optional): where it's used, print size…"></textarea>
               <input id="saveAuthor" type="text" maxlength="200" list="authorList" autocomplete="off" placeholder="Author (optional): whose code this is; other projects list codes by author">
               <datalist id="authorList"></datalist>
-              <input type="text" name="username" value="admin" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">
-              <input id="saveToken" name="password" type="password" autocomplete="current-password" placeholder="Admin token" hidden>
               <div class="row"><button type="submit" class="primary" id="replaceBtn" value="replace" hidden>Replace</button><button type="submit" class="primary" id="saveNew" value="new">Save</button><span id="saveMsg" class="hint"></span></div>
             </form>
           </div>

@@ -27,10 +27,18 @@ function getDecoders() {
   return decodersPromise;
 }
 
+// The page keeps this worker alive between runs (so ZXing's WebAssembly stays
+// compiled) and sends a new job instead; the running one stops at its next
+// candidate.
+let currentJob = null;
+const SUPERSEDED = Symbol('superseded');
+
 self.onmessage = async ({ data: msg }) => {
   if (msg.type !== 'generate') return;
   const { jobId } = msg;
+  currentJob = jobId;
   const post = (m) => self.postMessage({ jobId, ...m });
+  const stillCurrent = () => { if (currentJob !== jobId) throw SUPERSEDED; };
   try {
     const decoders = await getDecoders();
     post({ type: 'decoders', names: decoders.map((d) => d.name) });
@@ -40,12 +48,14 @@ self.onmessage = async ({ data: msg }) => {
       decoders,
       onStart: (t) => { total = t; post({ type: 'start', total }); },
       onCandidate: (candidate) => {
+        stillCurrent();
         post({ type: 'candidate', candidate });
         post({ type: 'progress', done: ++done, total });
       },
     });
     post({ type: 'done' });
   } catch (e) {
+    if (e === SUPERSEDED) return;
     post({ type: 'error', message: e.message || String(e) });
   }
 };

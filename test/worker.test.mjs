@@ -6,7 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { encodeId, decodeCode } from '../src/worker.js';
+import { encodeId, decodeCode, parseSvg } from '../src/worker.js';
+import { planFragment, pickFragmentVersion } from '../public/js/fragment.js';
+import { buildShapes, toSVG } from '../public/js/render.js';
+import { pinkLogo } from './helpers.mjs';
 
 // ---------------------------------------------------------------- code sequence
 
@@ -380,8 +383,12 @@ test('author.create / read / update / delete: tokens stay viewable, rotate and r
 
   // the token can be viewed again later, one author or in the list
   assert.equal((await (await rpc('author.read', { name: 'viewer@example.com' })).json()).token, created.token);
-  const { authors } = await (await rpc('author.read')).json();
+  const { authors } = await (await rpc('author.read', { include_tokens: true })).json();
   assert.equal(authors.find((a) => a.name === 'viewer@example.com').token, created.token);
+  // ...but not by default, so pages that only need names never receive them
+  const names = await (await rpc('author.read')).json();
+  assert.ok(names.authors.length && names.authors.every((a) => a.token === undefined));
+  await expectStatus(await rpc('author.read', { include_tokens: 'yes' }), 400);
 
   await expectStatus(await rpc('author.create', { name: 'viewer@example.com' }), 409); // names are unique
   for (const name of ['', '   ', 'x'.repeat(201), 7]) await expectStatus(await rpc('author.create', { name }), 400, String(name));
@@ -450,12 +457,20 @@ test('an author token only reaches its own codes, and cannot create or move them
   await expectStatus(await rpc('qr.read', { id: a.id }), 404);
 });
 
-test('an author token can read links and change destinations, nothing else', async () => {
+test('an author token reads and repoints only its own links, nothing else', async () => {
   const k = await authorKey('link-user');
-  const link = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in?events=1' })).json();
+  const link = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in?events=1', author: 'link-user' })).json();
+  assert.equal(link.author, 'link-user');
+  const other = await (await rpc('link.create', { url: 'https://example.com/someone-elses' })).json();
 
   const { links } = await (await rpc('link.read', {}, k)).json();
-  assert.ok(links.some((l) => l.code === link.code));
+  assert.deepEqual(links.map((l) => l.code), [link.code]);
+  // someone else's link looks like it doesn't exist, and can't be repointed
+  await expectStatus(await rpc('link.read', { code: other.code }, k), 404);
+  await expectStatus(await rpc('link.update', { code: other.code, url: 'https://phish.example/' }, k), 404);
+  assert.equal((await (await rpc('link.read', { code: other.code })).json()).url, 'https://example.com/someone-elses');
+  await expectStatus(await rpc('link.update', { code: link.code, new_author: 'someone' }, k), 403);
+  await expectStatus(await rpc('link.read', { author: 'someone' }, k), 403);
   assert.equal((await (await rpc('link.read', { code: link.code }, k)).json()).url, 'https://dancewithb.fun/check-in?events=1');
   const r = await rpc('link.update', { code: link.code, url: 'https://dancewithb.fun/check-in?events=2' }, k);
   assert.equal(r.status, 200);
@@ -489,4 +504,73 @@ test('spec.read: the API specification, admin only, covering every method', asyn
   assert.deepEqual(spec.methods.find((m) => m.name === 'qr.read').verbs, ['GET', 'POST']);
   assert.deepEqual(spec.methods.find((m) => m.name === 'qr.delete').verbs, ['POST']);
   assert.ok(spec.errors.some((e) => e.status === 409));
+});
+
+test('qr.* SVGs: only what the generator writes is accepted', async () => {
+  const ok = [
+    SVG,
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 41 41" width="1024" height="1024" shape-rendering="geometricPrecision"><g fill="#e8365d"><circle cx="4.5" cy="4.5" r="0.45"/><path fill-rule="evenodd" d="M4 4h7v7h-7ZM5 5h5v5h-5Z"/><rect x="-0.01" y="4" width="1.02" height="1.02" rx="0.3"/></g></svg>',
+  ];
+  for (const svg of ok) await expectStatus(await rpc('qr.create', { name: 'ok', text: 'x', svg }), 201, svg.slice(0, 60));
+  const bad = [
+    SVG.replace('</g>', '<img/src/onerror=alert(1)></g>'),        // slash-separated handler
+    SVG.replace('</g>', '<style>*{background:url(x)}</style></g>'),
+    SVG.replace('</g>', 'text outside tags</g>'),
+    SVG.replace('fill="#000"', 'fill="url(javascript:alert(1))"'),
+    SVG.replace('<rect ', '<rect onclick="x" '),
+    SVG.replace('<rect ', '<rect style="x:y" '),
+    SVG.replace('</g>', '<use href="#a"/></g>'),
+    SVG.replace('</g>', '<!-- x --></g>'),
+    SVG.replace('</g>', '<![CDATA[x]]></g>'),
+    SVG + SVG,                                                     // two documents
+    SVG.replace('</svg>', ''),                                    // unclosed
+    SVG.replace('<g fill="#000">', '<g fill="#000"><svg>'),      // nested svg
+    SVG.replace('xmlns="http://www.w3.org/2000/svg"', 'xmlns="http://example.com/"'),
+    "<svg xmlns='http://www.w3.org/2000/svg'></svg>",              // single quotes aren't what we write
+  ];
+  for (const svg of bad) await expectStatus(await rpc('qr.create', { name: 'x', text: 'x', svg }), 400, svg.slice(0, 90));
+  // the same rules apply when an author token replaces a code
+  const k = await authorKey('svg-author');
+  const { id } = await (await rpc('qr.create', { name: 'mine', text: 'x', svg: SVG, author: 'svg-author' })).json();
+  await expectStatus(await rpc('qr.update', { id, text: 'y', svg: bad[0] }, k), 400);
+});
+
+test('authors cannot silently take over codes and links already carrying their name', async () => {
+  await (await rpc('qr.create', { name: 'Left behind', text: 'x', svg: SVG, author: 'bob' })).arrayBuffer();
+  await (await rpc('link.create', { url: 'https://example.com/bobs', author: 'bob' })).arrayBuffer();
+  let r = await rpc('author.create', { name: 'bob' });
+  assert.equal(r.status, 409);
+  assert.match((await r.json()).error, /1 saved code\(s\) and 1 link\(s\).*adopt_existing/);
+  await (await rpc('author.create', { name: 'alice' })).arrayBuffer();
+  await expectStatus(await rpc('author.update', { name: 'alice', new_name: 'bob' }), 409);
+  // with consent, the token gets them
+  r = await rpc('author.create', { name: 'bob', adopt_existing: true });
+  assert.equal(r.status, 201);
+  const bob = await r.json();
+  assert.equal(bob.codes, 1);
+  assert.equal(bob.links, 1);
+  const { designs } = await (await rpc('qr.read', {}, { Authorization: `Bearer ${bob.token}` })).json();
+  assert.deepEqual(designs.map((d) => d.name), ['Left behind']);
+  await expectStatus(await rpc('author.create', { name: 'carol', adopt_existing: 'yes' }), 400);
+});
+
+test('a destination may not loop back to a short link on any of our hosts', async () => {
+  // wBase's PUBLIC_BASE_URL is https://dancewithb.fun: links made through 127.0.0.1 can't point there either
+  for (const url of ['https://dancewithb.fun/c/a', 'https://dancewithb.fun/C/a', `${wBase.base}/c/a`]) {
+    await expectStatus(await rpc('link.create', { url }, auth, wBase), 400, url);
+  }
+  await expectStatus(await rpc('link.create', { url: 'https://dancewithb.fun/check-in' }, auth, wBase), 201);
+});
+
+test('every SVG the generator writes passes the save-time allowlist', () => {
+  const link = 'https://qr.dancewithb.fun/c/a';
+  for (const version of [pickFragmentVersion(link, 3, 1, 8), 8]) {
+    const plan = planFragment({ image: pinkLogo(), threshold: 0.65, deadzone: 0.1, link, ecl: 3, version, strength: 0.6 });
+    for (const shape of ['dots', 'rounded', 'squares', 'connected'])
+      for (const eyes of ['square', 'rounded', 'dot'])
+        for (const style of [{}, { tintLight: true, maxLum: 0.56, lightLum: 0.78 }, { keepColors: false }, { bg: null }, { dotStructure: false }]) {
+          const svg = toSVG(buildShapes(plan, { shape, eyes, ...style }));
+          assert.doesNotThrow(() => parseSvg(svg), `v${version} ${shape}/${eyes}/${JSON.stringify(style)}`);
+        }
+  }
 });

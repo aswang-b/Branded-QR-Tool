@@ -125,6 +125,14 @@ test('detailed grids: up to version 6 for small codes, 3 versions finer above', 
   assert.equal(detailedVersion(39), 40);
 });
 
+test('variants: no duplicate Detailed grid when the code is already the largest size', () => {
+  const long = 'https://example.com/' + 'x'.repeat(1200); // needs version 40 at H (35 at Q)
+  const vs = variants(long);
+  const h = vs.filter((v) => v.ecl === 3);
+  assert.ok(h.length === 2 && h.every((v) => v.version === 40 && v.grid === 'Compact'), vs.map((v) => v.grid + v.version).join());
+  assert.equal(new Set(vs.map((v) => `${v.ecl}/${v.version}/${v.strength}`)).size, vs.length);
+});
+
 test('variants: 2 error-correction levels x 2 grids x 2 strengths', () => {
   const vs = variants(LINK);
   assert.equal(vs.length, 8);

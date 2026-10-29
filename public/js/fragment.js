@@ -9,7 +9,7 @@
 // Reverse-engineered from a MosQR code: https://mosqr.co/<id>?m=qr#<55 chars of [0-9a-z]>
 // filling a version 8-H symbol exactly, plus 12 of 13 correctable codewords per block.
 
-import { getLayout, numDataCodewords, MAX_VERSION } from './qr.js';
+import { getLayout, numDataCodewords, charCountBits, MAX_VERSION } from './qr.js';
 import { planArt, buildTargets, maskGrid, WANT_DARK } from './art.js';
 
 /** RFC 3986 "unreserved" characters: safe in a fragment without escaping. */
@@ -22,8 +22,7 @@ const utf8Length = (s) => new TextEncoder().encode(s).length;
 
 /** How many fragment characters fit after `base#` in this version/ecl. */
 export function fragmentRoom(base, version, ecl) {
-  const cc = version <= 9 ? 8 : 16;
-  return Math.floor((numDataCodewords(version, ecl) * 8 - 4 - cc) / 8) - utf8Length(base) - 1;
+  return Math.floor((numDataCodewords(version, ecl) * 8 - 4 - charCountBits(version)) / 8) - utf8Length(base) - 1;
 }
 
 /** Smallest version >= minVersion leaving at least `minRoom` fragment characters. */
@@ -39,9 +38,8 @@ export function pickFragmentVersion(base, ecl, minVersion = 1, minRoom = 8) {
  */
 export function fitFragment(base, layout, targets, mask, alphabet = FRAGMENT_ALPHABET) {
   const { version, ecl, size, order, dataPos } = layout;
-  const cc = version <= 9 ? 8 : 16;
   const room = fragmentRoom(base, version, ecl);
-  const start0 = 4 + cc + 8 * (utf8Length(base) + 1);
+  const start0 = 4 + charCountBits(version) + 8 * (utf8Length(base) + 1);
   const mg = maskGrid(size, mask);
   const { want, wgt } = targets;
   const codes = Array.from(alphabet, (c) => c.charCodeAt(0));

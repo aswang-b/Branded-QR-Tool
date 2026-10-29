@@ -38,6 +38,11 @@
         <label for="label">Label <span class="muted">(optional, for your reference)</span></label>
         <input id="label" type="text" maxlength="100" placeholder="Class check-in">
       </div>
+      <div class="field">
+        <label for="author">Author <span class="muted">(optional: that author's API token can read and repoint this link)</span></label>
+        <input id="author" type="text" maxlength="200" list="authorList" autocomplete="off" spellcheck="false" placeholder="e.g. alex@example.com">
+        <datalist id="authorList"></datalist>
+      </div>
       <button type="button" class="primary" id="create">Create</button>
       <div id="created" class="created" hidden></div>
     </section>
@@ -47,7 +52,7 @@
       <p id="msg" class="status" role="status" aria-live="polite"></p>
       <div class="table-wrap">
         <table id="table" hidden>
-          <thead><tr><th>Code</th><th>Destination</th><th>Hits</th><th>Created</th><th></th></tr></thead>
+          <thead><tr><th>Code</th><th>Destination</th><th>Author</th><th>Hits</th><th>Created</th><th></th></tr></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>

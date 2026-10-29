@@ -8,7 +8,7 @@
 //   {t:'ring', x, y, w, h, rx, hx, hy, hw, hh, hrx, c}  rounded rect with a rounded hole
 
 import { WANT_LIGHT, luminance } from './art.js';
-import { alignmentPositions } from './qr.js';
+import { alignmentCentres } from './qr.js';
 
 export const DEFAULT_STYLE = {
   fg: [0, 0, 0],            // colour of dark modules outside the image
@@ -79,15 +79,6 @@ function eyeShapes(cx, cy, style, color) {
     out.push({ t: 'ring', x: cx, y: cy, w: 7, h: 7, rx: 2.2, hx: cx + 1, hy: cy + 1, hw: 5, hh: 5, hrx: 1.6, c: color });
     out.push({ t: 'c', cx: cx + 3.5, cy: cy + 3.5, r: 1.55, c: color });
   }
-  return out;
-}
-
-/** Centres (module coords) of the 5x5 alignment patterns, skipping the finder corners. */
-function alignmentCentres(version) {
-  const pos = alignmentPositions(version), n = pos.length, out = [];
-  for (let i = 0; i < n; i++)
-    for (let j = 0; j < n; j++)
-      if (!((i === 0 && j === 0) || (i === 0 && j === n - 1) || (i === n - 1 && j === 0))) out.push([pos[i], pos[j]]);
   return out;
 }
 

@@ -133,27 +133,31 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 
 | Method | Params | Returns | Who |
 |---|---|---|---|
-| `link.create` | `url`, `label?` | the link (201) | admin |
-| `link.read` | `code` | one link | admin, author |
-| `link.read` | `limit?`, `offset?` | `{links: […]}`, newest first | admin, author |
-| `link.update` | `code`, `url?`, `label?` | the link | admin, author |
+| `link.create` | `url`, `label?`, `author?` | the link (201) | admin |
+| `link.read` | `code` | one link | admin, author* |
+| `link.read` | `author?`, `limit?`, `offset?` | `{links: […]}`, newest first | admin, author* |
+| `link.update` | `code`, `url?`, `label?`, `new_author?` | the link | admin, author* |
 | `link.delete` | `code` | `{deleted}` | admin |
 | `qr.create` | `name`, `text`, `svg`, `details?`, `author?`, `meta?`, `image?` | the code (201) | admin |
 | `qr.read` | `id`, `format?` | one code with `svg` and `image`; with `"format": "svg"` the raw `image/svg+xml` | admin, author* |
 | `qr.read` | `author?`, `limit?`, `offset?` | `{designs: […]}` (no SVGs), newest first | admin, author* |
 | `qr.update` | `id`, `name?`, `details?`, `text` + `svg`?, `meta?`, `image?`, `new_author?` | the code | admin, author* |
 | `qr.delete` | `id` | `{deleted}` | admin, author* |
-| `author.create` | `name` | the author with their token (201) | admin |
-| `author.read` | `name?` | one author, or `{authors: […]}`, with tokens | admin |
-| `author.update` | `name`, `new_name?`, `rotate_token?` | the author | admin |
+| `author.create` | `name`, `adopt_existing?` | the author with their token (201) | admin |
+| `author.read` | `name` | one author, with token | admin |
+| `author.read` | `include_tokens?` | `{authors: […]}` (tokens only when asked) | admin |
+| `author.update` | `name`, `new_name?`, `rotate_token?`, `adopt_existing?` | the author | admin |
 | `author.delete` | `name` | `{deleted}` | admin |
 | `spec.read` | | the specification | admin |
 
 **Tokens.** `ADMIN_TOKEN` is a Wrangler secret and can do everything. **Author tokens** (`qra_…`) are
 for other projects' servers: authorize an author on the **Authors** tab (or `author.create`) and they
-get their own token. \* An author token only ever reaches its own author's codes (another author's
-code answers 404, and naming another author is refused); it can't create codes (they are made in the
-generator), move one to another author (`new_author`), or manage authors. For the admin, `author` is
+get their own token. \* An author token only ever reaches its own author's codes and short links
+(another author's answer 404, and naming another author is refused); it can't create codes or links,
+move one to another author (`new_author`), or manage authors. Give a link to an author on the
+*Short links* page (Author field, or the Author button). Creating or renaming an author onto a name
+that codes or links already carry (e.g. left by a revoked author) is refused with 409 unless you pass
+`adopt_existing: true` (the Authors page asks first). For the admin, `author` is
 an optional filter. Authors are free text, e.g. an email address or a project name, set with the
 generator's Author field and shown on *Saved codes*.
 
@@ -166,10 +170,13 @@ when you signed in (the server never sends the secret). Lost it? Set a new one w
 
 Errors are `{"error": "…"}` with status 400 (bad params), 401 (missing, wrong or revoked token), 403
 (the token can't do that), 404 (unknown method, or nothing with that id/code/name), 405 (wrong HTTP
-verb), 409 (author name taken), or 503 (`ADMIN_TOKEN` not configured: the API fails closed). `image`
-is the source logo as a PNG data URL (at most 300 kB), kept so the editor can regenerate the code.
-SVGs containing scripts, event handlers or links are rejected, and only `http(s)` destinations are
-accepted. Keep tokens in server-side secrets, never in browser code.
+verb), 409 (author name taken, or already on codes/links without `adopt_existing`), or 503
+(`ADMIN_TOKEN` not configured: the API fails closed). `image` is the source logo as a PNG data URL (at
+most 300 kB), kept so the editor can regenerate the code. SVGs must match what the generator writes
+(only `svg`, `g`, `rect`, `circle` and `path` with plain shape and colour attributes); anything else is
+rejected. Only `http(s)` destinations are accepted, and never one of our own short links. Author tokens
+record when they were last used (at most hourly). Keep tokens in server-side secrets, never in browser
+code.
 
 ### Using codes from other projects
 
