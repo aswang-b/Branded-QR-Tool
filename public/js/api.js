@@ -17,7 +17,7 @@ const el = (tag, cls, text) => {
   return e;
 };
 const code = (text) => el('code', null, text);
-const ROLE_NAMES = { admin: 'Admin token', api: 'API key' };
+const ROLE_NAMES = { admin: 'Admin token', author: 'Author token' };
 
 function table(headers, rows) {
   const wrap = el('div', 'table-wrap');
@@ -49,7 +49,7 @@ function section(title, ...children) {
 
 function exampleCall(spec, m, role) {
   const url = spec.base.replace('<method>', m.name);
-  const tokenVar = role === 'api' ? '$API_TOKEN' : '$ADMIN_TOKEN';
+  const tokenVar = role === 'author' ? '$AUTHOR_TOKEN' : '$ADMIN_TOKEN';
   return [
     `curl -X POST ${url} \\`,
     `  -H "Authorization: Bearer ${tokenVar}" \\`,
@@ -69,27 +69,29 @@ function overview(spec) {
   return section('Overview', list);
 }
 
-/** The API key's capabilities in plain words, from the methods it may call. */
-function apiKeyActions(spec) {
-  const can = spec.methods.filter((m) => m.roles.includes('api'));
-  const cannot = spec.methods.filter((m) => !m.roles.includes('api'));
+/** An author token's capabilities in plain words, from the methods it may call. */
+function authorActions(spec) {
+  const can = spec.methods.filter((m) => m.roles.includes('author'));
+  const cannot = spec.methods.filter((m) => !m.roles.includes('author'));
   const ul = el('ul', 'api-list');
   for (const m of can) {
     const li = el('li');
-    const scoped = m.params.some((p) => p.name === 'author' && p.required === 'API key');
-    li.append(code(m.name), ` ${m.summary}${scoped ? ' Only for the author passed in "author".' : ''}`);
+    const scoped = m.name.startsWith('qr.');
+    li.append(code(m.name), ` ${m.summary}${scoped ? ' Only the token\'s own author\'s codes.' : ''}`);
     ul.append(li);
   }
   const no = el('p', 'hint');
+  const a = el('a', null, 'Authors');
+  a.href = 'authors.html';
   no.append('Admin only: ', ...cannot.flatMap((m, i) => [i ? ', ' : '', code(m.name)]),
-    '. The API key also cannot move a code to another author (new_author).');
-  return section('What the API key can do', ul, no);
+    '. An author token also cannot move a code to another author (new_author). Create and view author tokens on ', a, '.');
+  return section('What an author token can do', ul, no);
 }
 
 function objects(spec) {
   const out = [];
   for (const [name, fields] of Object.entries(spec.objects)) {
-    out.push(el('h3', null, name === 'design' ? 'Saved code (design)' : 'Link'));
+    out.push(el('h3', null, { design: 'Saved code (design)', link: 'Link', author: 'Author' }[name] || name));
     out.push(table(['Field', 'Type and meaning'], Object.entries(fields).map(([k, v]) => [code(k), v])));
   }
   return section('Objects returned', ...out);
@@ -107,7 +109,7 @@ function method(spec, m) {
   if (m.params.length) {
     s.append(el('h3', null, 'Params'));
     s.append(table(['Name', 'Type', 'Required', 'Description'], m.params.map((p) => [
-      code(p.name), p.type, p.required === true ? 'yes' : p.required === false ? 'no' : `with the ${p.required}`, p.desc,
+      code(p.name), p.type, p.required ? 'yes' : 'no', p.desc,
     ])));
   } else {
     s.append(el('p', 'hint', 'No params.'));
@@ -117,7 +119,7 @@ function method(spec, m) {
   s.append(ret);
   if (m.notes) s.append(el('p', 'hint', m.notes));
   s.append(el('h3', null, 'Example'));
-  s.append(el('pre', 'code-block', exampleCall(spec, m, m.roles.includes('api') ? 'api' : 'admin')));
+  s.append(el('pre', 'code-block', exampleCall(spec, m, m.roles.includes('author') ? 'author' : 'admin')));
   return s;
 }
 
@@ -131,7 +133,7 @@ function render(spec) {
   }));
   root.replaceChildren(
     overview(spec),
-    apiKeyActions(spec),
+    authorActions(spec),
     section('Methods', toc),
     ...spec.methods.map((m) => method(spec, m)),
     objects(spec),

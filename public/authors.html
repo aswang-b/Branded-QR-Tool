@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authors</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e8365d'/%3E%3Cpath d='M7 7h7v7H7zM18 7h7v7h-7zM7 18h7v7H7zM18 18h3v3h-3zM22 22h3v3h-3z' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="top">
+    <nav class="nav"><a href="index.html">Make</a><a href="links.html">Short links</a><a href="saved.html">Saved codes</a><a href="authors.html" aria-current="page">Authors</a><a href="api.html">API</a></nav>
+    <h1>Authors</h1>
+    <p>Authorize authors to use the API. Each gets their own token, limited to their own saved codes. See <a href="api.html">API</a> for what a token can do.</p>
+  </header>
+  <main class="stack">
+    <section class="panel" aria-label="Sign in">
+      <div class="field">
+        <label for="token">Admin token</label>
+        <div class="row nowrap">
+          <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
+          <button type="button" class="small" id="showAdmin">Show</button>
+          <button type="button" class="small" id="copyAdmin">Copy</button>
+        </div>
+        <label class="check"><input id="remember" type="checkbox"> Remember on this device</label>
+        <p class="hint">This is the token you sign in with. It is a Cloudflare secret the server never sends out, so this shows the copy saved in this browser. Lost it? Set a new one with <code>npx wrangler secret put ADMIN_TOKEN</code>.</p>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="Add an author">
+      <h2>Add an author</h2>
+      <div class="row nowrap">
+        <input id="newName" type="text" maxlength="200" autocomplete="off" spellcheck="false" placeholder="Name exactly as on their codes, e.g. alex@example.com">
+        <button type="button" class="primary" id="create">Create token</button>
+      </div>
+      <p class="hint">Codes belong to an author through the Author field when you save them in the generator.</p>
+    </section>
+
+    <section class="panel">
+      <div class="row between"><h2>Authorized authors</h2><button type="button" class="small" id="refresh">Refresh</button></div>
+      <p id="msg" class="status" role="status" aria-live="polite"></p>
+      <div class="table-wrap">
+        <table id="table" hidden>
+          <thead><tr><th>Author</th><th>Token</th><th>Codes</th><th>Last used</th><th></th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="js/authors.js"></script>
+</body>
+</html>

@@ -9,25 +9,32 @@
 // format "svg".
 //
 //   link.create  {url, label?}                                    admin
-//   link.read    {code} -> one link | {limit?, offset?} -> list    admin, API key
-//   link.update  {code, url?, label?}                             admin, API key
+//   link.read    {code} -> one link | {limit?, offset?} -> list    admin, author
+//   link.update  {code, url?, label?}                             admin, author
 //   link.delete  {code}                                           admin
 //   qr.create    {name, text, svg, details?, author?, meta?, image?}  admin
 //   qr.read      {id, format?: "json"|"svg"} -> one design (with svg and logo)
-//                {author?, limit?, offset?} -> list (no svg)       admin, API key*
+//                {author?, limit?, offset?} -> list (no svg)       admin, author*
 //   qr.update    {id, name?, details?, text + svg?, meta?, image?, new_author?}
-//                                                                 admin, API key*
-//   qr.delete    {id}                                             admin, API key*
-//   * the API key must pass {author} on every qr.* call and only ever sees that
-//     author's designs; it can't create designs or move them to another author.
+//                                                                 admin, author*
+//   qr.delete    {id}                                             admin, author*
+//   * an author token only ever sees its own author's designs; it can't create
+//     designs or move them to another author.
+//   author.create {name} -> the author with a new token            admin
+//   author.read   {name} -> one author | {} -> list (with tokens)  admin
+//   author.update {name, new_name?, rotate_token?}                 admin
+//   author.delete {name}                                          admin
 //   spec.read    {} -> this API's specification (see spec.js)       admin
 //
 // Everything else is served from the static assets (see wrangler.jsonc: the
 // Worker only runs for /c/* and /api/*, so the site itself stays free of
 // per-request Worker invocations).
 //
-// Auth: Authorization: Bearer <token>. ADMIN_TOKEN can do everything.
-// API_TOKEN (optional) is for other projects' servers, limited as above.
+// Auth: Authorization: Bearer <token>. ADMIN_TOKEN (a Wrangler secret) can do
+// everything. Author tokens are made with author.create, one per author, for
+// other projects' servers; each is limited to its own author as above. They
+// are stored so the admin can view them again later (author.read), and can be
+// rotated or revoked.
 //
 // Codes are the row id written in bijective base 36 over a-z then 0-9:
 //   1 -> a, 26 -> z, 27 -> 0, 36 -> 9, 37 -> aa, 38 -> ab, ...
@@ -100,19 +107,37 @@ async function safeEqual(a, b) {
   return diff === 0;
 }
 
-/** @returns {Promise<'admin'|'api'|Response>} the caller's role, or an error response */
-async function authorize(request, env) {
+const sha256Hex = async (text) =>
+  [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, '0')).join('');
+
+/** A new author token: "qra_" + 32 random bytes, base64url. */
+function newAuthorToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return 'qra_' + btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * Who is calling: the admin (ADMIN_TOKEN) or an author (a token made by
+ * author.create, looked up by its SHA-256 so the index holds no secrets).
+ * @returns {Promise<{role: 'admin'} | {role: 'author', author: string} | Response>}
+ */
+async function authorize(request, env, ctx) {
   if (!env.ADMIN_TOKEN) return json({ error: 'ADMIN_TOKEN is not configured on this Worker' }, 503);
   const m = /^Bearer\s+(.+)$/.exec(request.headers.get('Authorization') || '');
   const given = m ? m[1].trim() : '';
-  // Compare against both (when set) so timing doesn't reveal which matched.
-  const [admin, apiKey] = await Promise.all([
-    safeEqual(given, env.ADMIN_TOKEN),
-    env.API_TOKEN ? safeEqual(given, env.API_TOKEN) : false,
-  ]);
-  if (m && admin) return 'admin';
-  if (m && apiKey) return 'api';
-  return json({ error: 'Unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
+  const unauthorized = () => json({ error: 'Unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
+  if (!given) return unauthorized();
+  if (await safeEqual(given, env.ADMIN_TOKEN)) return { role: 'admin' };
+  if (!given.startsWith('qra_')) return unauthorized();
+  await ensureSchema(env.DB);
+  const hash = await sha256Hex(given);
+  const row = await env.DB.prepare('SELECT name FROM authors WHERE token_hash = ?').bind(hash).first();
+  if (!row) return unauthorized();
+  ctx?.waitUntil(
+    env.DB.prepare('UPDATE authors SET last_used = ? WHERE token_hash = ?').bind(Math.floor(Date.now() / 1000), hash).run()
+      .catch((e) => console.error('last_used update failed', e)),
+  );
+  return { role: 'author', author: row.name };
 }
 
 async function readJson(request, maxBytes = MAX_BODY_BYTES) {
@@ -233,6 +258,18 @@ function ensureSchema(db) {
     // Added later: tables created before them get the columns here.
     .then(() => addColumn(db, 'designs', 'image TEXT'))
     .then(() => addColumn(db, 'designs', "author TEXT NOT NULL DEFAULT ''"))
+    // Authors who may use the API, each with their own token. The token is kept
+    // (not just its hash) because the admin wants to view it again later.
+    .then(() => db.prepare(
+      `CREATE TABLE IF NOT EXISTS authors (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         name TEXT NOT NULL UNIQUE,
+         token TEXT NOT NULL,
+         token_hash TEXT NOT NULL UNIQUE,
+         created_at INTEGER NOT NULL,
+         last_used INTEGER
+       )`,
+    ).run())
     .then(() => db.prepare('CREATE INDEX IF NOT EXISTS designs_author ON designs (author, id)').run())
     .catch((e) => {
       schemaReady = null;
@@ -334,17 +371,86 @@ function parseDesignId(value) {
 }
 
 /**
- * The author a qr.* call is limited to: the API key must name one and then
- * only sees that author's designs; the admin may optionally filter by one.
+ * The author a qr.* call is limited to: an author token is always limited to
+ * its own author (passing a different "author" is refused); the admin may
+ * optionally filter by one.
  * @returns {string|null} null = all authors
  */
-function authorScope(p, role) {
-  if (role === 'api') {
-    if (typeof p.author !== 'string' || !p.author.trim()) throw new HttpError(400, 'The API key must pass "author"');
-    return parseText(p.author, 'author', MAX_AUTHOR_LENGTH);
+function authorScope(p, who) {
+  if (who.role === 'author') {
+    if (p.author !== undefined && p.author !== who.author) throw new HttpError(403, `This token belongs to author "${who.author}"`);
+    return who.author;
   }
   return p.author === undefined ? null : parseText(p.author, 'author', MAX_AUTHOR_LENGTH, { required: false });
 }
+
+function presentAuthor(row) {
+  return {
+    name: row.name,
+    token: row.token,
+    created_at: row.created_at,
+    last_used: row.last_used ?? null,
+    codes: row.codes ?? 0,
+  };
+}
+
+const AUTHOR_SELECT = 'SELECT a.name, a.token, a.created_at, a.last_used, (SELECT COUNT(*) FROM designs d WHERE d.author = a.name) AS codes FROM authors a';
+const parseAuthorName = (v, field = 'name') => parseText(v, field, MAX_AUTHOR_LENGTH);
+
+const authorCreate = async ({ env, p }) => {
+  const name = parseAuthorName(p.name);
+  const token = newAuthorToken();
+  try {
+    await env.DB.prepare('INSERT INTO authors (name, token, token_hash, created_at) VALUES (?, ?, ?, ?)')
+      .bind(name, token, await sha256Hex(token), Math.floor(Date.now() / 1000))
+      .run();
+  } catch (e) {
+    if (/UNIQUE/i.test(String(e?.message ?? e))) throw new HttpError(409, `An author named "${name}" already exists`);
+    throw e;
+  }
+  return json(presentAuthor(await env.DB.prepare(`${AUTHOR_SELECT} WHERE a.name = ?`).bind(name).first()), 201);
+};
+
+const authorRead = async ({ env, p }) => {
+  if (p.name !== undefined) {
+    const row = await env.DB.prepare(`${AUTHOR_SELECT} WHERE a.name = ?`).bind(parseAuthorName(p.name)).first();
+    return row ? json(presentAuthor(row)) : json({ error: 'Not found' }, 404);
+  }
+  const { results } = await env.DB.prepare(`${AUTHOR_SELECT} ORDER BY a.name COLLATE NOCASE`).all();
+  return json({ authors: results.map(presentAuthor) });
+};
+
+const authorUpdate = async ({ env, p }) => {
+  const name = parseAuthorName(p.name);
+  if (!(await env.DB.prepare('SELECT 1 FROM authors WHERE name = ?').bind(name).first())) return json({ error: 'Not found' }, 404);
+  const newName = p.new_name === undefined ? name : parseAuthorName(p.new_name, 'new_name');
+  if (p.rotate_token !== undefined && typeof p.rotate_token !== 'boolean') throw new HttpError(400, '"rotate_token" must be true or false');
+  if (newName === name && !p.rotate_token) throw new HttpError(400, 'Nothing to update: send "new_name" and/or "rotate_token": true');
+  const stmts = [];
+  if (p.rotate_token) {
+    const token = newAuthorToken();
+    stmts.push(env.DB.prepare('UPDATE authors SET token = ?, token_hash = ?, last_used = NULL WHERE name = ?').bind(token, await sha256Hex(token), name));
+  }
+  if (newName !== name) {
+    // The author's codes move with the rename, so the token keeps reaching them.
+    stmts.push(env.DB.prepare('UPDATE authors SET name = ? WHERE name = ?').bind(newName, name));
+    stmts.push(env.DB.prepare('UPDATE designs SET author = ? WHERE author = ?').bind(newName, name));
+  }
+  try {
+    await env.DB.batch(stmts);
+  } catch (e) {
+    if (/UNIQUE/i.test(String(e?.message ?? e))) throw new HttpError(409, `An author named "${newName}" already exists`);
+    throw e;
+  }
+  return json(presentAuthor(await env.DB.prepare(`${AUTHOR_SELECT} WHERE a.name = ?`).bind(newName).first()));
+};
+
+const authorDelete = async ({ env, p }) => {
+  const name = parseAuthorName(p.name);
+  const res = await env.DB.prepare('DELETE FROM authors WHERE name = ?').bind(name).run();
+  // Their saved codes stay (still labelled with the name); only the token stops working.
+  return res.meta?.changes ? json({ deleted: name }) : json({ error: 'Not found' }, 404);
+};
 
 const linkCreate = async ({ env, url, base, p }) => {
   const row = await env.DB.prepare(`INSERT INTO links (url, label, created_at) VALUES (?, ?, ?) RETURNING ${LINK_COLUMNS}`)
@@ -398,8 +504,8 @@ const qrCreate = async ({ req, env, base, p }) => {
   return json(presentDesign(await fetchDesign(env.DB, id, null), base), 201);
 };
 
-const qrRead = async ({ env, base, p, role }) => {
-  const author = authorScope(p, role);
+const qrRead = async ({ env, base, p, who }) => {
+  const author = authorScope(p, who);
   if (p.id !== undefined) {
     const format = p.format ?? 'json';
     if (format !== 'json' && format !== 'svg') throw new HttpError(400, '"format" must be "json" or "svg"');
@@ -425,8 +531,8 @@ const qrRead = async ({ env, base, p, role }) => {
   return json({ designs: results.map((r) => presentDesign(r, base)) });
 };
 
-const qrUpdate = async ({ req, env, base, p, role }) => {
-  const author = authorScope(p, role);
+const qrUpdate = async ({ req, env, base, p, who }) => {
+  const author = authorScope(p, who);
   const id = parseDesignId(p.id);
   const sets = [];
   const args = [];
@@ -434,7 +540,7 @@ const qrUpdate = async ({ req, env, base, p, role }) => {
   if (p.details !== undefined) { sets.push('details = ?'); args.push(parseText(p.details, 'details', MAX_DETAILS_LENGTH, { required: false })); }
   if (p.new_author !== undefined) {
     // Moving a design to another author would take it out of the key's reach.
-    if (role === 'api') throw new HttpError(403, 'The API key cannot change a design\'s author');
+    if (who.role === 'author') throw new HttpError(403, 'An author token cannot change a design\'s author');
     sets.push('author = ?'); args.push(parseText(p.new_author, 'new_author', MAX_AUTHOR_LENGTH, { required: false }));
   }
   // Replacing the code itself (from the editor) sends text and svg together.
@@ -453,8 +559,8 @@ const qrUpdate = async ({ req, env, base, p, role }) => {
   return json(presentDesign(await fetchDesign(env.DB, id, null), base));
 };
 
-const qrDelete = async ({ env, p, role }) => {
-  const author = authorScope(p, role);
+const qrDelete = async ({ env, p, who }) => {
+  const author = authorScope(p, who);
   const id = parseDesignId(p.id);
   const scope = author === null ? ['', []] : [' AND author = ?', [author]];
   const res = await env.DB.prepare(`DELETE FROM designs WHERE id = ?${scope[0]}`).bind(id, ...scope[1]).run();
@@ -464,30 +570,34 @@ const qrDelete = async ({ env, p, role }) => {
 /** read: callable with GET; big: accepts design-sized bodies. */
 const METHODS = {
   'link.create': { roles: ['admin'], run: linkCreate },
-  'link.read': { roles: ['admin', 'api'], read: true, run: linkRead },
-  'link.update': { roles: ['admin', 'api'], run: linkUpdate },
+  'link.read': { roles: ['admin', 'author'], read: true, run: linkRead },
+  'link.update': { roles: ['admin', 'author'], run: linkUpdate },
   'link.delete': { roles: ['admin'], run: linkDelete },
   'qr.create': { roles: ['admin'], big: true, run: qrCreate },
-  'qr.read': { roles: ['admin', 'api'], read: true, run: qrRead },
-  'qr.update': { roles: ['admin', 'api'], big: true, run: qrUpdate },
-  'qr.delete': { roles: ['admin', 'api'], run: qrDelete },
+  'qr.read': { roles: ['admin', 'author'], read: true, run: qrRead },
+  'qr.update': { roles: ['admin', 'author'], big: true, run: qrUpdate },
+  'qr.delete': { roles: ['admin', 'author'], run: qrDelete },
+  'author.create': { roles: ['admin'], run: authorCreate },
+  'author.read': { roles: ['admin'], read: true, run: authorRead },
+  'author.update': { roles: ['admin'], run: authorUpdate },
+  'author.delete': { roles: ['admin'], run: authorDelete },
   'spec.read': { roles: ['admin'], read: true, run: ({ base }) => json(buildSpec(METHODS, base)) },
 };
 
-async function api(request, env, url) {
+async function api(request, env, url, ctx) {
   const name = /^\/api\/([a-z]+\.[a-z]+)\/?$/.exec(url.pathname)?.[1];
   const method = name && Object.hasOwn(METHODS, name) ? METHODS[name] : null;
   if (!method) return json({ error: `Unknown method. Use one of: ${Object.keys(METHODS).join(', ')}` }, 404);
   const verbs = method.read ? 'GET, POST' : 'POST';
   if (request.method !== 'POST' && !(method.read && request.method === 'GET')) return json({ error: `${name} takes ${verbs}` }, 405, { Allow: verbs });
-  const role = await authorize(request, env);
-  if (role instanceof Response) return role;
-  if (!method.roles.includes(role)) return json({ error: `The API key cannot call ${name}` }, 403);
+  const who = await authorize(request, env, ctx);
+  if (who instanceof Response) return who;
+  if (!method.roles.includes(who.role)) return json({ error: `An author token cannot call ${name}` }, 403);
   const p = request.method === 'GET'
     ? Object.fromEntries(url.searchParams)
     : await readJson(request, method.big ? MAX_DESIGN_BODY_BYTES : MAX_BODY_BYTES);
   await ensureSchema(env.DB);
-  return method.run({ req: request, env, url, base: publicBase(request, env), p, role });
+  return method.run({ req: request, env, url, base: publicBase(request, env), p, who });
 }
 
 export default {
@@ -497,7 +607,7 @@ export default {
       const short = /^\/c\/([A-Za-z0-9]+)\/?$/.exec(url.pathname);
       if (short) return await redirect(request, env, ctx, short[1]);
       if (url.pathname.startsWith('/c/') || url.pathname === '/c') return notFound();
-      if (url.pathname.startsWith('/api/')) return await api(request, env, url);
+      if (url.pathname.startsWith('/api/')) return await api(request, env, url, ctx);
       return env.ASSETS ? env.ASSETS.fetch(request) : notFound();
     } catch (e) {
       if (e instanceof HttpError) return json({ error: e.message }, e.status);

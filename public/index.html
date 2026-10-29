@@ -10,7 +10,7 @@
 </head>
 <body>
   <header class="top">
-    <nav class="nav"><a href="index.html" aria-current="page">Make</a><a href="links.html">Short links</a><a href="saved.html">Saved codes</a><a href="api.html">API</a></nav>
+    <nav class="nav"><a href="index.html" aria-current="page">Make</a><a href="links.html">Short links</a><a href="saved.html">Saved codes</a><a href="authors.html">Authors</a><a href="api.html">API</a></nav>
     <h1>Branded QR</h1>
     <p>Your logo, built into the QR pattern itself. Every design is scored with a simulated phone camera before you pick one.</p>
   </header>
@@ -153,7 +153,8 @@
               <h3>Save this code</h3>
               <input id="saveName" type="text" maxlength="100" placeholder="Name, e.g. Class check-in sticker" required>
               <textarea id="saveDetails" maxlength="2000" rows="2" placeholder="Details (optional): where it's used, print size…"></textarea>
-              <input id="saveAuthor" type="text" maxlength="200" placeholder="Author (optional): whose code this is; other projects list codes by author">
+              <input id="saveAuthor" type="text" maxlength="200" list="authorList" autocomplete="off" placeholder="Author (optional): whose code this is; other projects list codes by author">
+              <datalist id="authorList"></datalist>
               <input id="saveToken" type="password" autocomplete="off" placeholder="Admin token" hidden>
               <div class="row"><button type="submit" class="primary" id="replaceBtn" value="replace" hidden>Replace</button><button type="submit" class="primary" id="saveNew" value="new">Save</button><span id="saveMsg" class="hint"></span></div>
             </form>

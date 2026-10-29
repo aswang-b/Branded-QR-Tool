@@ -28,8 +28,16 @@ const DESIGN = {
   image: 'string | null: source logo as a PNG data URL (qr.read with an id only)',
 };
 
-// For qr.* the API key must name an author; the admin may use it as a filter.
-const AUTHOR_SCOPE = param('author', 'string', 'API key', 'API key: required on every call; only that author\'s codes are visible (others answer 404). Admin: optional filter.');
+const AUTHOR = {
+  name: 'string: the author, as stored on their saved codes',
+  token: 'string: their API token ("qra_…"); viewable again with author.read',
+  created_at: 'number: Unix seconds',
+  last_used: 'number | null: Unix seconds the token was last used',
+  codes: 'number: saved codes with this author',
+};
+
+// An author token is always limited to its own author; the admin may filter by one.
+const AUTHOR_SCOPE = param('author', 'string', false, 'Author token: not needed (always its own author; a different one is refused with 403). Admin: optional filter.');
 
 export const METHOD_DOCS = {
   'link.create': {
@@ -92,7 +100,7 @@ export const METHOD_DOCS = {
       param('offset', 'number', false, 'List only: how many to skip, default 0.'),
     ],
     returns: 'One code, the raw SVG (format "svg"; may be cached privately for up to 5 minutes), or {designs: [code, …]}, newest first.',
-    example: { author: 'alex@example.com', id: 12, format: 'svg' },
+    example: { id: 12, format: 'svg' },
   },
   'qr.update': {
     summary: 'Rename a saved code, edit its details, replace the code itself, or (admin) move it to another author.',
@@ -105,17 +113,46 @@ export const METHOD_DOCS = {
       param('svg', 'string', false, 'Replacement SVG (same rules as qr.create). Must come with text.'),
       param('meta', 'object', false, 'Replaces the stored meta.'),
       param('image', 'string', false, 'Replaces the stored logo (PNG data URL).'),
-      param('new_author', 'string', false, 'Admin only: move the code to this author. The API key gets 403.'),
+      param('new_author', 'string', false, 'Admin only: move the code to this author. An author token gets 403.'),
     ],
     returns: 'The updated code without svg/image.',
     notes: 'Send at least one field to change. The code keeps its id, so anything referring to it stays valid.',
-    example: { author: 'alex@example.com', id: 12, name: 'Check-in sticker v2' },
+    example: { id: 12, name: 'Check-in sticker v2' },
   },
   'qr.delete': {
     summary: 'Delete a saved code. Short links it used keep working.',
     params: [param('id', 'number', true, 'The code to delete.'), AUTHOR_SCOPE],
     returns: '{deleted: id}.',
-    example: { author: 'alex@example.com', id: 12 },
+    example: { id: 12 },
+  },
+  'author.create': {
+    summary: 'Authorize an author: creates their API token, limited to their own saved codes.',
+    params: [param('name', 'string', true, 'The author, 1–200 characters, exactly as on their saved codes (e.g. an email or project name). Must be unique.')],
+    returns: 'The author, including the token (status 201; 409 if the name exists).',
+    example: { name: 'alex@example.com' },
+  },
+  'author.read': {
+    summary: 'Read one author with their token, or list all authors with their tokens.',
+    params: [param('name', 'string', false, 'With a name: that author. Without: all authors, by name.')],
+    returns: 'One author, or {authors: [author, …]}.',
+    example: { name: 'alex@example.com' },
+  },
+  'author.update': {
+    summary: 'Rename an author (their saved codes move with them) and/or rotate their token.',
+    params: [
+      param('name', 'string', true, 'The author to change.'),
+      param('new_name', 'string', false, 'New name; their saved codes are relabelled to match.'),
+      param('rotate_token', 'boolean', false, 'true: issue a new token. The old one stops working at once.'),
+    ],
+    returns: 'The updated author, including the (new) token.',
+    notes: 'Send new_name and/or rotate_token: true.',
+    example: { name: 'alex@example.com', rotate_token: true },
+  },
+  'author.delete': {
+    summary: 'Revoke an author: their token stops working. Their saved codes stay, still labelled with their name.',
+    params: [param('name', 'string', true, 'The author to remove.')],
+    returns: '{deleted: name}.',
+    example: { name: 'alex@example.com' },
   },
   'spec.read': {
     summary: 'This specification, as JSON.',
@@ -126,18 +163,19 @@ export const METHOD_DOCS = {
 };
 
 export const ERRORS = [
-  { status: 400, meaning: 'Bad or missing params (the message says which). Also: the API key called qr.* without an author.' },
-  { status: 401, meaning: 'Missing or wrong token.' },
-  { status: 403, meaning: 'The token is valid but may not do this (e.g. the API key calling link.create, or setting new_author).' },
-  { status: 404, meaning: 'Unknown method, or no link/code with that code/id (for the API key, also another author\'s code).' },
+  { status: 400, meaning: 'Bad or missing params (the message says which).' },
+  { status: 401, meaning: 'Missing, wrong or revoked token.' },
+  { status: 403, meaning: 'The token is valid but may not do this (e.g. an author token calling link.create, naming another author, or setting new_author).' },
+  { status: 404, meaning: 'Unknown method, or nothing with that code/id/name (for an author token, also another author\'s code).' },
   { status: 405, meaning: 'Wrong HTTP verb: writes are POST only; reads take GET or POST.' },
+  { status: 409, meaning: 'An author with that name already exists.' },
   { status: 413, meaning: 'Request body too large.' },
   { status: 503, meaning: 'ADMIN_TOKEN is not configured: the API refuses everything.' },
 ];
 
 export const ROLE_DOCS = {
-  admin: 'ADMIN_TOKEN: everything, including the generator, Saved codes and Short links pages.',
-  api: 'API_TOKEN: for other projects\' servers. Reads and repoints short links; lists, fetches, edits and deletes one author\'s saved codes per call. Cannot create links or codes, delete links, move codes between authors, or see other authors\' codes.',
+  admin: 'ADMIN_TOKEN (a Wrangler secret): everything, including the site\'s pages and managing authors.',
+  author: 'Author token ("qra_…", made with author.create): for other projects\' servers. Reads and repoints short links; lists, fetches, edits and deletes its own author\'s saved codes. Cannot create links or codes, delete links, move codes between authors, see other authors\' codes, or manage authors.',
 };
 
 /**
@@ -150,7 +188,7 @@ export function buildSpec(methods, base) {
     transport: 'POST /api/<method> with a JSON object body. Methods marked "read" also accept GET /api/<method>?<params> (values arrive as strings).',
     auth: 'Authorization: Bearer <token> on every call.',
     roles: ROLE_DOCS,
-    objects: { link: LINK, design: DESIGN },
+    objects: { link: LINK, design: DESIGN, author: AUTHOR },
     methods: Object.entries(methods).map(([name, m]) => ({
       name,
       verbs: m.read ? ['GET', 'POST'] : ['POST'],

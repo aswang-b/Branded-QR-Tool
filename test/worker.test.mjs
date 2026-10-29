@@ -99,13 +99,12 @@ async function startWorker(vars = {}) {
 }
 
 const TOKEN = 'test-token-123';
-const API_TOKEN = 'api-key-456';
 const auth = { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' };
 let w, wBase, wBare;
 
 before(async () => {
   [w, wBase, wBare] = await Promise.all([
-    startWorker({ ADMIN_TOKEN: TOKEN, API_TOKEN }),
+    startWorker({ ADMIN_TOKEN: TOKEN }),
     startWorker({ ADMIN_TOKEN: TOKEN, PUBLIC_BASE_URL: 'https://dancewithb.fun/' }),
     startWorker({}),
   ]);
@@ -128,7 +127,6 @@ test('static site is still served (not through the redirect logic)', async () =>
 /** POST /api/<method> with JSON params (auth: the admin token unless given). */
 const rpc = (method, params = {}, headers = auth, worker = w) =>
   worker.call(`/api/${method}`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(params) });
-const key = { Authorization: `Bearer ${API_TOKEN}` };
 async function expectStatus(res, status, msg) {
   assert.equal(res.status, status, msg);
   await res.arrayBuffer();
@@ -349,7 +347,7 @@ test('designs: realistic generated SVGs fit', async () => {
   await r.arrayBuffer();
 });
 
-// ---------------------------------------------------------------- authors and the API key
+// ---------------------------------------------------------------- authors (admin filter)
 
 test('authors: the admin sets and filters by author', async () => {
   const mine = await (await rpc('qr.create', { name: 'Mine', text: 'x', svg: SVG, author: 'alex@example.com' })).json();
@@ -362,63 +360,123 @@ test('authors: the admin sets and filters by author', async () => {
   assert.equal(moved.author, 'alex@example.com');
 });
 
-test('the API key: one author at a time for qr.*, no creating or moving designs', async () => {
+// ---------------------------------------------------------------- authors and their tokens
+
+/** Authorize an author (admin) and return their bearer header. */
+async function authorKey(name) {
+  const r = await rpc('author.create', { name });
+  assert.equal(r.status, 201);
+  const a = await r.json();
+  assert.match(a.token, /^qra_[A-Za-z0-9_-]{43}$/);
+  return { Authorization: `Bearer ${a.token}` };
+}
+
+test('author.create / read / update / delete: tokens stay viewable, rotate and revoke', async () => {
+  let r = await rpc('author.create', { name: 'viewer@example.com' });
+  const created = await r.json();
+  assert.equal(created.name, 'viewer@example.com');
+  assert.equal(created.codes, 0);
+  assert.equal(created.last_used, null);
+
+  // the token can be viewed again later, one author or in the list
+  assert.equal((await (await rpc('author.read', { name: 'viewer@example.com' })).json()).token, created.token);
+  const { authors } = await (await rpc('author.read')).json();
+  assert.equal(authors.find((a) => a.name === 'viewer@example.com').token, created.token);
+
+  await expectStatus(await rpc('author.create', { name: 'viewer@example.com' }), 409); // names are unique
+  for (const name of ['', '   ', 'x'.repeat(201), 7]) await expectStatus(await rpc('author.create', { name }), 400, String(name));
+
+  // using the token records last_used
+  const old = { Authorization: `Bearer ${created.token}` };
+  await expectStatus(await rpc('qr.read', {}, old), 200);
+  await new Promise((res) => setTimeout(res, 300));
+  assert.ok((await (await rpc('author.read', { name: 'viewer@example.com' })).json()).last_used > 0);
+
+  // rotating issues a new token; the old one stops working at once
+  const rotated = await (await rpc('author.update', { name: 'viewer@example.com', rotate_token: true })).json();
+  assert.notEqual(rotated.token, created.token);
+  await expectStatus(await rpc('qr.read', {}, old), 401);
+  await expectStatus(await rpc('qr.read', {}, { Authorization: `Bearer ${rotated.token}` }), 200);
+  await expectStatus(await rpc('author.update', { name: 'viewer@example.com' }), 400); // nothing to change
+  await expectStatus(await rpc('author.update', { name: 'nobody', rotate_token: true }), 404);
+
+  // deleting revokes the token
+  await expectStatus(await rpc('author.delete', { name: 'viewer@example.com' }), 200);
+  await expectStatus(await rpc('qr.read', {}, { Authorization: `Bearer ${rotated.token}` }), 401);
+  await expectStatus(await rpc('author.delete', { name: 'viewer@example.com' }), 404);
+});
+
+test('renaming an author takes their codes along, so their token still reaches them', async () => {
+  const k = await authorKey('old-name');
+  const { id } = await (await rpc('qr.create', { name: 'Theirs', text: 'x', svg: SVG, author: 'old-name' })).json();
+  await (await rpc('author.create', { name: 'taken' })).arrayBuffer();
+  await expectStatus(await rpc('author.update', { name: 'old-name', new_name: 'taken' }), 409);
+  const renamed = await (await rpc('author.update', { name: 'old-name', new_name: 'new-name' })).json();
+  assert.equal(renamed.name, 'new-name');
+  assert.equal(renamed.codes, 1);
+  assert.equal((await (await rpc('qr.read', { id })).json()).author, 'new-name');
+  const { designs } = await (await rpc('qr.read', {}, k)).json(); // same token, renamed author
+  assert.deepEqual(designs.map((d) => d.id), [id]);
+});
+
+test('an author token only reaches its own codes, and cannot create or move them', async () => {
+  const keyA = await authorKey('author-a');
   const a = await (await rpc('qr.create', { name: 'Author A', text: 'x', svg: SVG, author: 'author-a' })).json();
   const b = await (await rpc('qr.create', { name: 'Author B', text: 'x', svg: SVG, author: 'author-b' })).json();
 
-  // must name an author
-  for (const params of [{}, { author: '' }, { author: '  ' }, { id: a.id }]) await expectStatus(await rpc('qr.read', params, key), 400, JSON.stringify(params));
-
-  const { designs } = await (await rpc('qr.read', { author: 'author-a' }, key)).json();
+  const { designs } = await (await rpc('qr.read', {}, keyA)).json(); // no author param needed
   assert.deepEqual(designs.map((d) => d.id), [a.id]);
-  assert.equal((await (await rpc('qr.read', { author: 'author-a', id: a.id }, key)).json()).svg, SVG);
-  const img = await rpc('qr.read', { author: 'author-a', id: a.id, format: 'svg' }, key);
-  assert.equal(await img.text(), SVG);
+  assert.equal((await (await rpc('qr.read', { id: a.id }, keyA)).json()).svg, SVG);
+  assert.equal(await (await rpc('qr.read', { id: a.id, format: 'svg' }, keyA)).text(), SVG);
+  await expectStatus(await rpc('qr.read', { author: 'author-a' }, keyA), 200); // naming itself is fine
+  await expectStatus(await rpc('qr.read', { author: 'author-b' }, keyA), 403); // naming another isn't
 
-  // another author's design looks like it doesn't exist
-  await expectStatus(await rpc('qr.read', { author: 'author-a', id: b.id }, key), 404);
-  await expectStatus(await rpc('qr.read', { author: 'author-a', id: b.id, format: 'svg' }, key), 404);
-  await expectStatus(await rpc('qr.update', { author: 'author-a', id: b.id, name: 'Hijacked' }, key), 404);
-  await expectStatus(await rpc('qr.delete', { author: 'author-a', id: b.id }, key), 404);
+  // another author's code looks like it doesn't exist
+  await expectStatus(await rpc('qr.read', { id: b.id }, keyA), 404);
+  await expectStatus(await rpc('qr.read', { id: b.id, format: 'svg' }, keyA), 404);
+  await expectStatus(await rpc('qr.update', { id: b.id, name: 'Hijacked' }, keyA), 404);
+  await expectStatus(await rpc('qr.delete', { id: b.id }, keyA), 404);
   assert.equal((await (await rpc('qr.read', { id: b.id })).json()).name, 'Author B');
 
-  // its own author's designs: rename, replace, delete
-  const renamed = await (await rpc('qr.update', { author: 'author-a', id: a.id, name: 'A2', details: 'via API' }, key)).json();
-  assert.equal(renamed.name, 'A2');
-  const SVG2 = SVG.replace('#000', '#222');
-  await expectStatus(await rpc('qr.update', { author: 'author-a', id: a.id, text: 'y', svg: SVG2 }, key), 200);
-  await expectStatus(await rpc('qr.update', { author: 'author-a', id: a.id, new_author: 'author-b' }, key), 403);
-  await expectStatus(await rpc('qr.create', { name: 'x', text: 'x', svg: SVG, author: 'author-a' }, key), 403);
-  await expectStatus(await rpc('qr.delete', { author: 'author-a', id: a.id }, key), 200);
+  // its own codes: rename, replace, delete
+  assert.equal((await (await rpc('qr.update', { id: a.id, name: 'A2', details: 'via API' }, keyA)).json()).name, 'A2');
+  await expectStatus(await rpc('qr.update', { id: a.id, text: 'y', svg: SVG.replace('#000', '#222') }, keyA), 200);
+  await expectStatus(await rpc('qr.update', { id: a.id, new_author: 'author-b' }, keyA), 403);
+  await expectStatus(await rpc('qr.create', { name: 'x', text: 'x', svg: SVG, author: 'author-a' }, keyA), 403);
+  for (const m of ['author.create', 'author.read', 'author.update', 'author.delete', 'spec.read']) {
+    await expectStatus(await rpc(m, { name: 'author-a' }, keyA), 403, m);
+  }
+  await expectStatus(await rpc('qr.delete', { id: a.id }, keyA), 200);
   await expectStatus(await rpc('qr.read', { id: a.id }), 404);
 });
 
-test('the API key can read links and change destinations, nothing else', async () => {
+test('an author token can read links and change destinations, nothing else', async () => {
+  const k = await authorKey('link-user');
   const link = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in?events=1' })).json();
 
-  const { links } = await (await rpc('link.read', {}, key)).json();
+  const { links } = await (await rpc('link.read', {}, k)).json();
   assert.ok(links.some((l) => l.code === link.code));
-  assert.equal((await (await rpc('link.read', { code: link.code }, key)).json()).url, 'https://dancewithb.fun/check-in?events=1');
-  const r = await rpc('link.update', { code: link.code, url: 'https://dancewithb.fun/check-in?events=2' }, key);
+  assert.equal((await (await rpc('link.read', { code: link.code }, k)).json()).url, 'https://dancewithb.fun/check-in?events=1');
+  const r = await rpc('link.update', { code: link.code, url: 'https://dancewithb.fun/check-in?events=2' }, k);
   assert.equal(r.status, 200);
   assert.equal((await r.json()).url, 'https://dancewithb.fun/check-in?events=2');
   const go = await call(`/c/${link.code}`);
   assert.equal(go.headers.get('location'), 'https://dancewithb.fun/check-in?events=2#');
   await go.arrayBuffer();
 
-  await expectStatus(await rpc('link.create', { url: 'https://example.com/' }, key), 403);
-  await expectStatus(await rpc('link.delete', { code: link.code }, key), 403);
-  await expectStatus(await rpc('link.read', {}, { Authorization: 'Bearer api-key-457' }), 401);
-  // a worker without API_TOKEN doesn't accept it (or an empty bearer)
-  for (const t of [API_TOKEN, '']) await expectStatus(await rpc('link.read', {}, { Authorization: `Bearer ${t}` }, wBase), 401, JSON.stringify(t));
+  await expectStatus(await rpc('link.create', { url: 'https://example.com/' }, k), 403);
+  await expectStatus(await rpc('link.delete', { code: link.code }, k), 403);
+  for (const t of ['qra_' + 'A'.repeat(43), 'qra_', 'api-key-457']) await expectStatus(await rpc('link.read', {}, { Authorization: `Bearer ${t}` }), 401, t);
+  // tokens belong to one worker's database
+  await expectStatus(await rpc('link.read', {}, k, wBase), 401);
 });
 
 test('spec.read: the API specification, admin only, covering every method', async () => {
   await expectStatus(await rpc('spec.read', {}, {}), 401);
-  await expectStatus(await rpc('spec.read', {}, key), 403);
   const spec = await (await call('/api/spec.read', { headers: auth })).json(); // GET works too
   const names = spec.methods.map((m) => m.name);
-  assert.deepEqual(names, ['link.create', 'link.read', 'link.update', 'link.delete', 'qr.create', 'qr.read', 'qr.update', 'qr.delete', 'spec.read']);
+  assert.deepEqual(names, ['link.create', 'link.read', 'link.update', 'link.delete', 'qr.create', 'qr.read', 'qr.update', 'qr.delete',
+    'author.create', 'author.read', 'author.update', 'author.delete', 'spec.read']);
   for (const m of spec.methods) {
     assert.ok(m.summary && m.returns && Array.isArray(m.params), `${m.name} is documented`);
     assert.ok(m.params.every((p) => p.name && p.type && p.desc), `${m.name} params are documented`);
@@ -426,8 +484,9 @@ test('spec.read: the API specification, admin only, covering every method', asyn
   // who may call what comes from the enforced method table
   const roles = Object.fromEntries(spec.methods.map((m) => [m.name, m.roles.join(',')]));
   assert.equal(roles['link.create'], 'admin');
-  assert.equal(roles['qr.update'], 'admin,api');
+  assert.equal(roles['qr.update'], 'admin,author');
+  assert.equal(roles['author.read'], 'admin');
   assert.deepEqual(spec.methods.find((m) => m.name === 'qr.read').verbs, ['GET', 'POST']);
   assert.deepEqual(spec.methods.find((m) => m.name === 'qr.delete').verbs, ['POST']);
-  assert.ok(spec.errors.some((e) => e.status === 403));
+  assert.ok(spec.errors.some((e) => e.status === 409));
 });

@@ -533,6 +533,12 @@ syncLabels();
 checkColors();
 setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'dancewithb.fun logo');
 $('saveAuthor').value = store('localStorage')?.getItem('qrAuthor') || '';
+// Suggest authorized authors (see Authors) in the save form's Author field.
+if (getToken()) {
+  api('author.read').then(({ authors }) => {
+    $('authorList').replaceChildren(...authors.map((a) => Object.assign(document.createElement('option'), { value: a.name })));
+  }).catch(() => { /* suggestions only */ });
+}
 if (params.get('edit')) loadForEdit(params.get('edit'));
 
 // The settings column scrolls on its own (desktop layout); size it to the

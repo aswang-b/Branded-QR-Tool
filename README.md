@@ -123,6 +123,9 @@ Source layout (`public/` is the whole site):
 
 ## API
 
+The full specification (params, returns, examples, errors) is on the **API** tab, behind the admin
+token. It comes from `spec.read`, built from the same method table the Worker enforces.
+
 The API is a small set of named methods, `<domain>.<create|read|update|delete>`, called as
 `POST /api/<method>` with a JSON body. Read methods also accept `GET /api/<method>?<params>`. Anything
 that isn't plain CRUD sits under the closest method: listing is a `read` without an id, and the raw
@@ -131,47 +134,59 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 | Method | Params | Returns | Who |
 |---|---|---|---|
 | `link.create` | `url`, `label?` | the link (201) | admin |
-| `link.read` | `code` | one link | admin, API key |
-| `link.read` | `limit?`, `offset?` | `{links: […]}`, newest first | admin, API key |
-| `link.update` | `code`, `url?`, `label?` | the link | admin, API key |
+| `link.read` | `code` | one link | admin, author |
+| `link.read` | `limit?`, `offset?` | `{links: […]}`, newest first | admin, author |
+| `link.update` | `code`, `url?`, `label?` | the link | admin, author |
 | `link.delete` | `code` | `{deleted}` | admin |
 | `qr.create` | `name`, `text`, `svg`, `details?`, `author?`, `meta?`, `image?` | the code (201) | admin |
-| `qr.read` | `id`, `format?` | one code with `svg` and `image`; with `"format": "svg"` the raw `image/svg+xml` | admin, API key* |
-| `qr.read` | `author?`, `limit?`, `offset?` | `{designs: […]}` (no SVGs), newest first | admin, API key* |
-| `qr.update` | `id`, `name?`, `details?`, `text` + `svg`?, `meta?`, `image?`, `new_author?` | the code | admin, API key* |
-| `qr.delete` | `id` | `{deleted}` | admin, API key* |
+| `qr.read` | `id`, `format?` | one code with `svg` and `image`; with `"format": "svg"` the raw `image/svg+xml` | admin, author* |
+| `qr.read` | `author?`, `limit?`, `offset?` | `{designs: […]}` (no SVGs), newest first | admin, author* |
+| `qr.update` | `id`, `name?`, `details?`, `text` + `svg`?, `meta?`, `image?`, `new_author?` | the code | admin, author* |
+| `qr.delete` | `id` | `{deleted}` | admin, author* |
+| `author.create` | `name` | the author with their token (201) | admin |
+| `author.read` | `name?` | one author, or `{authors: […]}`, with tokens | admin |
+| `author.update` | `name`, `new_name?`, `rotate_token?` | the author | admin |
+| `author.delete` | `name` | `{deleted}` | admin |
+| `spec.read` | | the specification | admin |
 
-\* **The API key and authors.** Every `qr.*` call with the API key must pass `author`, and then only
-sees that author's codes: another author's code answers 404. The key can't create codes (they are
-made in the generator) or move one to another author (`new_author`). For the admin, `author` is an
-optional filter. Authors are free text, e.g. an email address or a project name, set in the
-generator's save form and shown on *Saved codes*.
+**Tokens.** `ADMIN_TOKEN` is a Wrangler secret and can do everything. **Author tokens** (`qra_…`) are
+for other projects' servers: authorize an author on the **Authors** tab (or `author.create`) and they
+get their own token. \* An author token only ever reaches its own author's codes (another author's
+code answers 404, and naming another author is refused); it can't create codes (they are made in the
+generator), move one to another author (`new_author`), or manage authors. For the admin, `author` is
+an optional filter. Authors are free text, e.g. an email address or a project name, set with the
+generator's Author field and shown on *Saved codes*.
 
-Errors are `{"error": "…"}` with status 400 (bad params), 401 (missing or wrong token), 403 (the API
-key can't call that), 404 (unknown method, or nothing with that id/code), 405 (wrong HTTP verb), or
-503 (`ADMIN_TOKEN` not configured: the API fails closed). `image` is the source logo as a PNG data URL
-(at most 300 kB), kept so the editor can regenerate the code. SVGs containing scripts, event handlers
-or links are rejected, and only `http(s)` destinations are accepted.
+Author tokens are stored so you can **view and copy them again later** on the Authors tab, which
+also rotates (new token, the old one stops at once), renames (their codes move with them) and revokes
+them. Because they are stored readable, anyone with read access to the D1 database can see them; rotate
+any you suspect leaked. The Authors tab also shows **your admin token**: the copy saved in that browser
+when you signed in (the server never sends the secret). Lost it? Set a new one with
+`npx wrangler secret put ADMIN_TOKEN`.
 
-**The API key.** `API_TOKEN` is a separate secret (`npx wrangler secret put API_TOKEN`) for other
-projects' servers, limited as in the table. Keep the admin token out of other projects, and keep the
-API key in server-side secrets, never in browser code.
+Errors are `{"error": "…"}` with status 400 (bad params), 401 (missing, wrong or revoked token), 403
+(the token can't do that), 404 (unknown method, or nothing with that id/code/name), 405 (wrong HTTP
+verb), 409 (author name taken), or 503 (`ADMIN_TOKEN` not configured: the API fails closed). `image`
+is the source logo as a PNG data URL (at most 300 kB), kept so the editor can regenerate the code.
+SVGs containing scripts, event handlers or links are rejected, and only `http(s)` destinations are
+accepted. Keep tokens in server-side secrets, never in browser code.
 
 ### Using codes from other projects
 
 Generating a code (planning, rendering, scan-scoring) takes seconds of CPU, far more than a free
-Worker request allows, so codes are made in the generator and other projects use them through the API:
+Worker request allows, so codes are made in the generator and other projects use them through the API
+with their author token:
 
-- **Show an author's codes:** `qr.read {author}` lists them; `qr.read {author, id, format: "svg"}`
-  returns one as an SVG for the other project's server to inline or serve from its own pages (a
-  plain `<img>` tag can't send the token). Responses may be cached for up to 5 minutes.
-- **Edit them:** `qr.update {author, id, name, details}` renames; `qr.delete {author, id}` deletes.
+- **Show the author's codes:** `qr.read {}` lists them; `qr.read {id, format: "svg"}` returns one as
+  an SVG for the other project's server to inline or serve from its own pages (a plain `<img>` tag
+  can't send the token). Responses may be cached for up to 5 minutes.
+- **Edit them:** `qr.update {id, name, details}` renames; `qr.delete {id}` deletes.
 - **Change what a printed code opens:** point the code at a short link and update the link when the
   destination should change, e.g. when a new class's check-in link is generated:
 
   ```
   POST https://qr.dancewithb.fun/api/link.update
-  Authorization: Bearer <API_TOKEN>
+  Authorization: Bearer <author token>
   Content-Type: application/json
 
   {"code": "a", "url": "https://dancewithb.fun/check-in?events=…"}
