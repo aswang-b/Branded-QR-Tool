@@ -126,28 +126,36 @@ Source layout (`public/` is the whole site):
 Generating a code (planning, rendering, scan-scoring) takes seconds of CPU, far more than a free
 Worker request allows, so other projects don't generate codes through an API. Instead:
 
-1. **Embed a saved code.** Every saved code has a public, unguessable image link,
-   `https://qr.dancewithb.fun/d/<20 hex characters>.svg` (on *Saved codes*: **Copy image link** or
-   **Copy <img> tag**). Use it in any page or email: `<img src="…/d/….svg" width="200" height="200">`.
-   Replacing the code in the editor updates every embed within about 5 minutes (it is cached for
-   300 s); the address never changes. Anyone with the link can see the code, so treat it like the
-   printed code itself. Deleting the saved code makes the link 404.
+1. **Fetch a saved code's image.** Every saved code has a stable image link,
+   `https://qr.dancewithb.fun/d/<20 hex characters>.svg` (on *Saved codes*: **Copy image link**). It
+   only answers with a token, so the other project's **server** fetches it and then inlines the SVG
+   or serves it from its own pages (a plain `<img>` tag can't send a token):
+
+   ```
+   GET https://qr.dancewithb.fun/d/<id>.svg
+   Authorization: Bearer <API_TOKEN>
+   ```
+
+   Replacing the code in the editor changes what the link returns; the address never changes.
+   Responses may be cached for up to 5 minutes (`Cache-Control: private, max-age=300`). Deleting
+   the saved code makes the link 404.
 2. **Change what a code opens, from another project's server.** Point the printed or embedded code
    at a short link, then update the short link's destination when it should change, e.g. when a new
    class's check-in link is generated:
 
    ```
    PATCH https://qr.dancewithb.fun/api/links/<code>
-   Authorization: Bearer <LINKS_TOKEN>
+   Authorization: Bearer <API_TOKEN>
    Content-Type: application/json
 
    {"url": "https://dancewithb.fun/check-in?events=…"}
    ```
 
-   `LINKS_TOKEN` is a separate secret (`npx wrangler secret put LINKS_TOKEN`) that can only list and
-   read links (`GET /api/links`, `GET /api/links/<code>`) and change a link's `url`/`label`
-   (`PATCH`). It can't create or delete links or touch saved designs, so keep the admin token out
-   of other projects. Store it in the other project's server-side secrets, never in browser code.
+**The API key.** `API_TOKEN` is a separate secret (`npx wrangler secret put API_TOKEN`) for other
+projects. It can only list and read links (`GET /api/links`, `GET /api/links/<code>`), change a
+link's `url`/`label` (`PATCH`), and fetch saved codes' images (`GET /d/<id>.svg`). It can't
+create or delete links or create, change or delete saved codes, so keep the admin token out of other
+projects. Store it in the other project's server-side secrets, never in browser code.
 
 ## Short links (redirect Worker)
 

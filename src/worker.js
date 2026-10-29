@@ -1,11 +1,11 @@
 // Short-link redirect Worker.
 //
 //   GET  /c/<code>            302 to the stored destination (public)
-//   GET  /d/<public id>.svg   a saved design's SVG, for <img> embeds (public)
+//   GET  /d/<image id>.svg    a saved design's SVG                (admin, API key)
 //   POST /api/links           create   {url, label?}            (admin)
-//   GET  /api/links           list                               (admin, links key)
-//   GET  /api/links/<code>    one link                           (admin, links key)
-//   PATCH /api/links/<code>   update   {url?, label?}            (admin, links key)
+//   GET  /api/links           list                               (admin, API key)
+//   GET  /api/links/<code>    one link                           (admin, API key)
+//   PATCH /api/links/<code>   update   {url?, label?}            (admin, API key)
 //   DELETE /api/links/<code>  delete                             (admin)
 //   POST /api/designs         save a generated QR design          (admin)
 //   GET  /api/designs         list saved designs (no SVG)          (admin)
@@ -18,9 +18,9 @@
 // per-request Worker invocations).
 //
 // Auth: Authorization: Bearer <token>. ADMIN_TOKEN can do everything.
-// LINKS_TOKEN (optional) is for other projects: it can only read short links
-// and change their destination/label, so a leak can't touch saved designs or
-// create/delete links.
+// API_TOKEN (optional) is for other projects' servers: it can only read short
+// links, change their destination/label, and fetch saved designs' SVGs, so a
+// leak can't create, edit or delete designs or create/delete links.
 //
 // Codes are the row id written in bijective base 36 over a-z then 0-9:
 //   1 -> a, 26 -> z, 27 -> 0, 36 -> 9, 37 -> aa, 38 -> ab, ...
@@ -90,23 +90,23 @@ async function safeEqual(a, b) {
   return diff === 0;
 }
 
-/** @returns {Promise<'admin'|'links'|Response>} the caller's role, or an error response */
+/** @returns {Promise<'admin'|'api'|Response>} the caller's role, or an error response */
 async function authorize(request, env) {
   if (!env.ADMIN_TOKEN) return json({ error: 'ADMIN_TOKEN is not configured on this Worker' }, 503);
   const m = /^Bearer\s+(.+)$/.exec(request.headers.get('Authorization') || '');
   const given = m ? m[1].trim() : '';
   // Compare against both (when set) so timing doesn't reveal which matched.
-  const [admin, links] = await Promise.all([
+  const [admin, apiKey] = await Promise.all([
     safeEqual(given, env.ADMIN_TOKEN),
-    env.LINKS_TOKEN ? safeEqual(given, env.LINKS_TOKEN) : false,
+    env.API_TOKEN ? safeEqual(given, env.API_TOKEN) : false,
   ]);
   if (m && admin) return 'admin';
-  if (m && links) return 'links';
+  if (m && apiKey) return 'api';
   return json({ error: 'Unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
 }
 
-/** What the links-only key may do: read links, and change a link's destination/label. */
-function linksKeyMay(request, url) {
+/** What the API key may do under /api: read links, and change a link's destination/label. */
+function apiKeyMay(request, url) {
   const m = /^\/api\/links(?:\/([A-Za-z0-9]+))?\/?$/.exec(url.pathname);
   if (!m) return false;
   return request.method === 'GET' || (request.method === 'PATCH' && !!m[1]);
@@ -279,7 +279,7 @@ function presentDesign(row, base, { withSvg = false } = {}) {
     details: row.details,
     text: row.text,
     link: row.link_id ? { code: encodeId(row.link_id), short: `${base}/c/${encodeId(row.link_id)}`, url: row.link_url ?? null } : null,
-    embed: row.public_id ? `${base}/d/${row.public_id}.svg` : null,
+    svg_url: row.public_id ? `${base}/d/${row.public_id}.svg` : null,
     meta,
     created_at: row.created_at,
   };
@@ -378,20 +378,22 @@ async function designsApi(request, env, url, base, rawId) {
 }
 
 /**
- * A saved design's SVG at its unguessable public id, for <img> embeds on other
- * sites. Replacing the design in the editor updates every embed (short cache).
+ * A saved design's SVG at its stable image id, for other projects: their
+ * server fetches it with the API key and shows it (an <img> tag can't send the
+ * key). Replacing the design in the editor updates what this returns.
  */
 async function embed(request, env, publicId) {
   if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
+  const role = await authorize(request, env);
+  if (role instanceof Response) return role;
   await ensureSchema(env.DB);
   const row = await env.DB.prepare('SELECT svg FROM designs WHERE public_id = ?').bind(publicId).first();
   if (!row) return new Response('Not found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
   return new Response(request.method === 'HEAD' ? null : row.svg, {
     headers: {
       'Content-Type': 'image/svg+xml; charset=utf-8',
-      'Cache-Control': 'public, max-age=300',
-      'Access-Control-Allow-Origin': '*',
-      'Cross-Origin-Resource-Policy': 'cross-origin',
+      // Behind a key: only the caller may cache it (briefly, so replacements show).
+      'Cache-Control': 'private, max-age=300',
       'X-Content-Type-Options': 'nosniff',
       // Saved SVGs are validated on save; this is belt and braces if one is opened directly.
       'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
@@ -402,7 +404,7 @@ async function embed(request, env, publicId) {
 async function api(request, env, url) {
   const role = await authorize(request, env);
   if (role instanceof Response) return role;
-  if (role === 'links' && !linksKeyMay(request, url)) return json({ error: 'This key can only read links and change their destination' }, 403);
+  if (role === 'api' && !apiKeyMay(request, url)) return json({ error: 'The API key can only read links, change their destination, and fetch saved codes\' images' }, 403);
   await ensureSchema(env.DB);
   const base = publicBase(request, env);
   const d = /^\/api\/designs(?:\/([^/]+))?\/?$/.exec(url.pathname);

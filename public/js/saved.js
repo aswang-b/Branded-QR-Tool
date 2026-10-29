@@ -58,8 +58,6 @@ async function pngFromSvg(svg, px) {
   }
 }
 
-const escapeAttr = (v) => v.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-
 async function copy(text, done) {
   try {
     await navigator.clipboard.writeText(text);
@@ -90,7 +88,7 @@ function render(designs) {
     if (m.printMm) fact(`At ${m.printMm} mm`, pct(m.atPrint));
     if (d.link) fact('Short link', `/c/${d.link.code} → ${d.link.url ?? '(deleted)'}`);
     fact('Saved', new Date(d.created_at * 1000).toLocaleString());
-    if (d.embed) fact('Image link', d.embed);
+    if (d.svg_url) fact('Image link (API key)', d.svg_url);
     info.append(facts, el('p', 'hint mono', d.text));
 
     let svg = null;
@@ -107,12 +105,9 @@ function render(designs) {
     actions.append(
       btn('PNG', async () => download(await pngFromSvg(await getSvg(), 2048), `${fileBase(d)}.png`), 'primary'),
       btn('SVG', async () => download(new Blob([await getSvg()], { type: 'image/svg+xml' }), `${fileBase(d)}.svg`)),
-      // Public, unguessable address of this code's SVG: other sites embed it with
-      // <img>, and replacing the code in the editor updates them all.
-      ...(d.embed ? [
-        btn('Copy image link', async () => copy(d.embed, 'Image link copied.')),
-        btn('Copy <img> tag', async () => copy(`<img src="${d.embed}" alt="${escapeAttr(d.name)}" width="200" height="200">`, 'Embed tag copied.')),
-      ] : []),
+      // Stable address of this code's SVG for other projects' servers, which
+      // fetch it with the API key; replacing the code updates what it returns.
+      ...(d.svg_url ? [btn('Copy image link', async () => copy(d.svg_url, 'Image link copied. Fetch it with the API key (see README).'))] : []),
       // Opens the code in the generator: same link, logo and settings, ready to
       // regenerate and replace this code or save a variation as a new one.
       btn('Edit', async () => { location.href = `index.html?edit=${d.id}`; }),

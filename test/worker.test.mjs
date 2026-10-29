@@ -99,13 +99,13 @@ async function startWorker(vars = {}) {
 }
 
 const TOKEN = 'test-token-123';
-const LINKS_TOKEN = 'links-only-456';
+const API_TOKEN = 'api-key-456';
 const auth = { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' };
 let w, wBase, wBare;
 
 before(async () => {
   [w, wBase, wBare] = await Promise.all([
-    startWorker({ ADMIN_TOKEN: TOKEN, LINKS_TOKEN }),
+    startWorker({ ADMIN_TOKEN: TOKEN, API_TOKEN }),
     startWorker({ ADMIN_TOKEN: TOKEN, PUBLIC_BASE_URL: 'https://dancewithb.fun/' }),
     startWorker({}),
   ]);
@@ -362,43 +362,57 @@ test('designs: realistic generated SVGs fit', async () => {
 
 // ---------------------------------------------------------------- embeds & the links-only key
 
-test('saved designs have a public SVG embed that follows replacements', async () => {
+test('saved designs have an SVG link for API users that follows replacements', async () => {
+  const key = { Authorization: `Bearer ${API_TOKEN}` };
   let r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'Embed me', text: 'x', svg: SVG }) });
   const saved = await r.json();
-  const m = /\/d\/([0-9a-f]{20})\.svg$/.exec(saved.embed);
-  assert.ok(m, saved.embed);
+  const m = /\/d\/([0-9a-f]{20})\.svg$/.exec(saved.svg_url);
+  assert.ok(m, saved.svg_url);
   const path = `/d/${m[1]}.svg`;
 
-  r = await call(path); // no token needed
+  // only with a token: the API key or the admin token
+  for (const headers of [{}, { Authorization: 'Bearer nope' }]) {
+    r = await call(path, { headers });
+    assert.equal(r.status, 401);
+    await r.arrayBuffer();
+  }
+  r = await wBare.call(path);
+  assert.equal(r.status, 503); // no tokens configured at all: fails closed
+  await r.arrayBuffer();
+  r = await call(path, { headers: auth });
+  assert.equal(r.status, 200);
+  await r.arrayBuffer();
+  r = await call(path, { headers: key });
   assert.equal(r.status, 200);
   assert.match(r.headers.get('content-type'), /^image\/svg\+xml/);
-  assert.equal(r.headers.get('access-control-allow-origin'), '*');
+  assert.equal(r.headers.get('access-control-allow-origin'), null); // server-to-server only
+  assert.match(r.headers.get('cache-control'), /^private/);
   assert.match(r.headers.get('content-security-policy'), /default-src 'none'/);
   assert.equal(await r.text(), SVG);
 
   const SVG2 = SVG.replace('#000', '#123456');
   r = await call(`/api/designs/${saved.id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ text: 'y', svg: SVG2 }) });
   await r.arrayBuffer();
-  r = await call(path);
+  r = await call(path, { headers: key });
   assert.equal(await r.text(), SVG2);
   r = await call(`/api/designs/${saved.id}`, { headers: auth });
-  assert.equal((await r.json()).embed, saved.embed); // the address never changes
+  assert.equal((await r.json()).svg_url, saved.svg_url); // the address never changes
 
   // ids are random, not the row id; unknown or malformed ones are 404
   for (const bad of [`/d/${'0'.repeat(20)}.svg`, `/d/${saved.id}.svg`, `/d/${m[1]}.png`, '/d/']) {
-    r = await call(bad);
+    r = await call(bad, { headers: key });
     assert.equal(r.status, 404, bad);
     await r.arrayBuffer();
   }
   r = await call(`/api/designs/${saved.id}`, { method: 'DELETE', headers: auth });
   await r.arrayBuffer();
-  r = await call(path);
+  r = await call(path, { headers: key });
   assert.equal(r.status, 404);
   await r.arrayBuffer();
 });
 
-test('the links-only key can read links and change destinations, nothing else', async () => {
-  const lk = { Authorization: `Bearer ${LINKS_TOKEN}`, 'Content-Type': 'application/json' };
+test('the API key can read links and change destinations, nothing else', async () => {
+  const lk = { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' };
   let r = await call('/api/links', { method: 'POST', headers: auth, body: JSON.stringify({ url: 'https://dancewithb.fun/check-in?events=1' }) });
   const link = await r.json();
 
@@ -425,11 +439,11 @@ test('the links-only key can read links and change destinations, nothing else', 
     assert.equal(r.status, 403, `${init.method || 'GET'} ${p}`);
     await r.arrayBuffer();
   }
-  r = await call('/api/links', { headers: { Authorization: 'Bearer links-only-457' } });
+  r = await call('/api/links', { headers: { Authorization: 'Bearer api-key-457' } });
   assert.equal(r.status, 401);
   await r.arrayBuffer();
-  // a worker without LINKS_TOKEN doesn't accept it (or an empty bearer)
-  for (const t of [LINKS_TOKEN, '']) {
+  // a worker without API_TOKEN doesn't accept it (or an empty bearer)
+  for (const t of [API_TOKEN, '']) {
     r = await wBase.call('/api/links', { headers: { Authorization: `Bearer ${t}` } });
     assert.equal(r.status, 401, JSON.stringify(t));
     await r.arrayBuffer();
