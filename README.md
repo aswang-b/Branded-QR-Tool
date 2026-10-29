@@ -59,7 +59,7 @@ the end-of-data marker instead (decoders ignore them).
 
 Each request produces 8 plans (error correction Q or H × compact or detailed grid × gentle or
 bold), rendered in colour and in black & white. Logo-coloured pixels are darkened to the
-contrast limit; finders, alignment and timing patterns stay solid so scanners can lock on.
+contrast limit; the three corner finders stay solid so scanners can lock on; alignment and timing patterns use the pixel shape (they scan as well dotted, and solid ones look like bullseyes).
 
 ## Testing scan reliability
 

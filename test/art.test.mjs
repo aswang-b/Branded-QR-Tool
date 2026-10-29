@@ -84,5 +84,13 @@ test('SVG export is well-formed and contains the shapes', () => {
   const svg = toSVG(r, 512);
   assert.match(svg, /^<svg [^>]*viewBox="0 0 \d+ \d+"/);
   assert.ok(!svg.includes('NaN'));
-  assert.equal((svg.match(/<circle|<rect/g) || []).length, r.shapes.length);
+  assert.equal((svg.match(/<circle|<rect|<path/g) || []).length, r.shapes.length);
+});
+
+test('alignment patterns are round rings, not square bullseyes (finders stay solid)', () => {
+  const plan = planArt({ text: TEXT, ecl: 1, minVersion: 8, image: pinkLogo() }); // v8: 6 alignment patterns
+  const rings = buildShapes(plan).shapes.filter((sh) => sh.t === 'ring');
+  assert.equal(rings.length, 6);
+  assert.ok(rings.every((sh) => sh.w === 5 && sh.rx === 2.5));
+  assert.equal(buildShapes(plan, { dotStructure: false }).shapes.filter((sh) => sh.t === 'ring').length, 0);
 });

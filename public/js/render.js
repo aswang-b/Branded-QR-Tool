@@ -8,6 +8,7 @@
 //   {t:'ring', x, y, w, h, rx, hx, hy, hw, hh, hrx, c}  rounded rect with a rounded hole
 
 import { WANT_LIGHT, luminance } from './art.js';
+import { alignmentPositions } from './qr.js';
 
 export const DEFAULT_STYLE = {
   fg: [0, 0, 0],            // colour of dark modules outside the image
@@ -20,6 +21,7 @@ export const DEFAULT_STYLE = {
   tintLight: false,         // also tint light modules inside the image
   lightLum: 0.86,           // tinted light modules are lightened to at least this (0-1)
   quiet: 4,                 // quiet zone, in modules
+  dotStructure: true,       // round alignment patterns, timing in the pixel shape (finders stay solid)
 };
 
 // Below this a module is too small a target for cheap phone cameras.
@@ -80,6 +82,15 @@ function eyeShapes(cx, cy, style, color) {
   return out;
 }
 
+/** Centres (module coords) of the 5x5 alignment patterns, skipping the finder corners. */
+function alignmentCentres(version) {
+  const pos = alignmentPositions(version), n = pos.length, out = [];
+  for (let i = 0; i < n; i++)
+    for (let j = 0; j < n; j++)
+      if (!((i === 0 && j === 0) || (i === 0 && j === n - 1) || (i === n - 1 && j === 0))) out.push([pos[i], pos[j]]);
+  return out;
+}
+
 /** @returns {{shapes: object[], total: number, bg: number[]|null}} sizes in module units */
 export function buildShapes(plan, style = {}) {
   const s = { ...DEFAULT_STYLE, ...style };
@@ -111,6 +122,20 @@ export function buildShapes(plan, style = {}) {
     }
   }
 
+  // Alignment patterns as a round ring + centre dot instead of a square
+  // bullseye: the continuous ring keeps the 1:1:1 proportions decoders look for
+  // (separate dots broke jsQR), and it reads as part of a dotted design.
+  const inAlign = new Uint8Array(size * size);
+  if (s.dotStructure && plan.version) {
+    for (const [cx, cy] of alignmentCentres(plan.version)) {
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) inAlign[(cy + dy) * size + cx + dx] = 1;
+      const x = cx - 2 + q, y = cy - 2 + q;
+      const c = darkColor(plan, cy * size + cx, s); // takes the logo colour inside the logo
+      shapes.push({ t: 'ring', x, y, w: 5, h: 5, rx: 2.5, hx: x + 1, hy: y + 1, hw: 3, hh: 3, hrx: 1.5, c });
+      shapes.push({ t: 'c', cx: cx + q + 0.5, cy: cy + q + 0.5, r: 0.6, c });
+    }
+  }
+
   const customEyes = s.eyes === 'rounded' || s.eyes === 'dot';
   if (customEyes) {
     for (const [fx, fy] of [[0, 0], [size - 7, 0], [0, size - 7]]) shapes.push(...eyeShapes(fx + q, fy + q, s.eyes, s.fg));
@@ -122,9 +147,12 @@ export function buildShapes(plan, style = {}) {
     const px = x + q, py = y + q;
     const color = darkColor(plan, i, s);
     if (plan.fn[i]) {
-      // Structural patterns stay solid, connected squares: scanners locate the
-      // code by them, and dotted finders fail to detect in many decoders.
+      // Finders stay solid, connected squares: scanners locate the code by them,
+      // and dotted finders fail to detect in many decoders.
       if (customEyes && inFinderCore(x, y, size)) continue;
+      if (inAlign[i]) continue;
+      // Timing and version modules take the pixel shape.
+      if (s.dotStructure && !inFinderZone(i, size)) { shapes.push(pixel(px, py, color)); continue; }
       shapes.push({ t: 'r', x: px - 0.01, y: py - 0.01, w: 1.02, h: 1.02, rx: 0, c: color });
       continue;
     }

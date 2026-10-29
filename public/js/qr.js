@@ -221,7 +221,7 @@ export function getLayout(version, ecl) {
   return L;
 }
 
-function alignmentPositions(ver) {
+export function alignmentPositions(ver) {
   if (ver === 1) return [];
   const n = Math.floor(ver / 7) + 2;
   const size = sizeOf(ver);
