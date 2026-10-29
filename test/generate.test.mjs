@@ -6,7 +6,7 @@ import { planArt } from '../public/js/art.js';
 import { planFragment, supportsFragment, fragmentRoom, pickFragmentVersion, FRAGMENT_ALPHABET } from '../public/js/fragment.js';
 import { buildShapes, rasterize, toSVG } from '../public/js/render.js';
 import { stressTest, jsqrDecoder, zxingDecoder, minPrintMm, rateAtPrint, cameraPxPerMm } from '../public/js/verify.js';
-import { variants, generateAll } from '../public/js/generate.js';
+import { variants, generateAll, detailedVersion } from '../public/js/generate.js';
 import { pinkLogo, zxing } from './helpers.mjs';
 
 const LINK = 'https://dancewithb.fun/c/q2';
@@ -118,11 +118,21 @@ test('print-size helpers', () => {
 
 // ---------------------------------------------------------------- the generator
 
+test('detailed grids: up to version 6 for small codes, 3 versions finer above', () => {
+  assert.equal(detailedVersion(2), 6);
+  assert.equal(detailedVersion(5), 6);
+  assert.equal(detailedVersion(6), 9);
+  assert.equal(detailedVersion(39), 40);
+});
+
 test('variants: 2 error-correction levels x 2 grids x 2 strengths', () => {
   const vs = variants(LINK);
   assert.equal(vs.length, 8);
   assert.ok(vs.every((v) => v.fragment));
   assert.deepEqual([...new Set(vs.map((v) => v.ecl))], [2, 3]);
+  // short links: detailed grids stop at version 6 (one alignment pattern)
+  assert.ok(vs.every((v) => v.version <= 6), vs.map((v) => v.version).join());
+  assert.ok(vs.some((v) => v.grid === 'Detailed' && v.version === 6));
   const plain = variants('just some text');
   assert.equal(plain.length, 8);
   assert.ok(plain.every((v) => !v.fragment));

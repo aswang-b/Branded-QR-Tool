@@ -58,8 +58,12 @@ For text that isn't a fragment-friendly http(s) link, the image goes into the pa
 the end-of-data marker instead (decoders ignore them).
 
 Each request produces 8 plans (error correction Q or H × compact or detailed grid × gentle or
-bold), rendered in colour and in black & white. Logo-coloured pixels are darkened to the
-contrast limit; the three corner finders stay solid so scanners can lock on; alignment and timing patterns use the pixel shape (they scan as well dotted, and solid ones look like bullseyes).
+bold), rendered in colour and in black & white. The detailed grid is 3 versions finer than the
+compact one, except that short links stop at 41×41 (version 6), the largest grid with a single
+alignment pattern. Logo-coloured pixels are darkened to the contrast limit. The three corner
+finders stay solid so scanners can lock on. Alignment patterns are drawn as round rings with a
+centre dot rather than square bullseyes (fully dotted ones broke jsQR), and timing patterns use
+the pixel shape.
 
 ## Testing scan reliability
 

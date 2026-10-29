@@ -14,7 +14,11 @@ export const STRENGTHS = [
 ];
 // Q and H only: lower levels scanned poorly once the logo is forced in (see README).
 const ECLS = [2, 3];
-const GRID_STEP = 3; // the "detailed" variant is this many versions finer
+const GRID_STEP = 3; // the "detailed" variant is this many versions finer...
+// ...except that small codes stop at version 6 (41x41), the largest with a
+// single alignment pattern: version 7 jumps to six of those round targets.
+const ONE_TARGET_MAX = 6;
+export const detailedVersion = (base) => Math.min(40, base < ONE_TARGET_MAX ? ONE_TARGET_MAX : base + GRID_STEP);
 
 /** Design variants: 2 error-correction levels x 2 grid sizes x 2 logo strengths = 8. */
 export function variants(link, { minVersion = 1 } = {}) {
@@ -24,7 +28,7 @@ export function variants(link, { minVersion = 1 } = {}) {
   for (const ecl of ECLS) {
     const base = fragment ? pickFragmentVersion(link, ecl, minVersion, 8) : pickVersion(bytes, ecl, minVersion);
     if (base < 0) continue;
-    for (const [grid, version] of [['Compact', base], ['Detailed', Math.min(40, base + GRID_STEP)]]) {
+    for (const [grid, version] of [['Compact', base], ['Detailed', detailedVersion(base)]]) {
       for (const s of STRENGTHS) out.push({ ecl, version, grid, strength: s.value, strengthLabel: s.label, fragment });
     }
   }
