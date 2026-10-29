@@ -121,6 +121,34 @@ Source layout (`public/` is the whole site):
 | `vendor/jsQR.js` | [jsQR](https://github.com/cozmo/jsQR) (Apache-2.0) |
 | `vendor/zxing/` | [zxing-wasm](https://github.com/Sec-ant/zxing-wasm) reader (MIT, ZXing-C++ Apache-2.0) |
 
+## Using codes from other projects
+
+Generating a code (planning, rendering, scan-scoring) takes seconds of CPU, far more than a free
+Worker request allows, so other projects don't generate codes through an API. Instead:
+
+1. **Embed a saved code.** Every saved code has a public, unguessable image link,
+   `https://qr.dancewithb.fun/d/<20 hex characters>.svg` (on *Saved codes*: **Copy image link** or
+   **Copy <img> tag**). Use it in any page or email: `<img src="…/d/….svg" width="200" height="200">`.
+   Replacing the code in the editor updates every embed within about 5 minutes (it is cached for
+   300 s); the address never changes. Anyone with the link can see the code, so treat it like the
+   printed code itself. Deleting the saved code makes the link 404.
+2. **Change what a code opens, from another project's server.** Point the printed or embedded code
+   at a short link, then update the short link's destination when it should change, e.g. when a new
+   class's check-in link is generated:
+
+   ```
+   PATCH https://qr.dancewithb.fun/api/links/<code>
+   Authorization: Bearer <LINKS_TOKEN>
+   Content-Type: application/json
+
+   {"url": "https://dancewithb.fun/check-in?events=…"}
+   ```
+
+   `LINKS_TOKEN` is a separate secret (`npx wrangler secret put LINKS_TOKEN`) that can only list and
+   read links (`GET /api/links`, `GET /api/links/<code>`) and change a link's `url`/`label`
+   (`PATCH`). It can't create or delete links or touch saved designs, so keep the admin token out
+   of other projects. Store it in the other project's server-side secrets, never in browser code.
+
 ## Short links (redirect Worker)
 
 Printed QR codes should not contain the real destination: a long URL makes a denser, harder-to-scan

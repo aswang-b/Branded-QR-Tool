@@ -1,9 +1,11 @@
 // Short-link redirect Worker.
 //
 //   GET  /c/<code>            302 to the stored destination (public)
+//   GET  /d/<public id>.svg   a saved design's SVG, for <img> embeds (public)
 //   POST /api/links           create   {url, label?}            (admin)
-//   GET  /api/links           list                               (admin)
-//   PATCH /api/links/<code>   update   {url?, label?}            (admin)
+//   GET  /api/links           list                               (admin, links key)
+//   GET  /api/links/<code>    one link                           (admin, links key)
+//   PATCH /api/links/<code>   update   {url?, label?}            (admin, links key)
 //   DELETE /api/links/<code>  delete                             (admin)
 //   POST /api/designs         save a generated QR design          (admin)
 //   GET  /api/designs         list saved designs (no SVG)          (admin)
@@ -12,8 +14,13 @@
 //   DELETE /api/designs/<id>  delete                               (admin)
 //
 // Everything else is served from the static assets (see wrangler.jsonc: the
-// Worker only runs for /c/* and /api/*, so the site itself stays free of
+// Worker only runs for /c/*, /d/* and /api/*, so the site itself stays free of
 // per-request Worker invocations).
+//
+// Auth: Authorization: Bearer <token>. ADMIN_TOKEN can do everything.
+// LINKS_TOKEN (optional) is for other projects: it can only read short links
+// and change their destination/label, so a leak can't touch saved designs or
+// create/delete links.
 //
 // Codes are the row id written in bijective base 36 over a-z then 0-9:
 //   1 -> a, 26 -> z, 27 -> 0, 36 -> 9, 37 -> aa, 38 -> ab, ...
@@ -83,14 +90,26 @@ async function safeEqual(a, b) {
   return diff === 0;
 }
 
-/** @returns {Promise<Response|null>} an error response, or null when authorised */
-async function requireAdmin(request, env) {
+/** @returns {Promise<'admin'|'links'|Response>} the caller's role, or an error response */
+async function authorize(request, env) {
   if (!env.ADMIN_TOKEN) return json({ error: 'ADMIN_TOKEN is not configured on this Worker' }, 503);
   const m = /^Bearer\s+(.+)$/.exec(request.headers.get('Authorization') || '');
-  if (!m || !(await safeEqual(m[1].trim(), env.ADMIN_TOKEN))) {
-    return json({ error: 'Unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
-  }
-  return null;
+  const given = m ? m[1].trim() : '';
+  // Compare against both (when set) so timing doesn't reveal which matched.
+  const [admin, links] = await Promise.all([
+    safeEqual(given, env.ADMIN_TOKEN),
+    env.LINKS_TOKEN ? safeEqual(given, env.LINKS_TOKEN) : false,
+  ]);
+  if (m && admin) return 'admin';
+  if (m && links) return 'links';
+  return json({ error: 'Unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
+}
+
+/** What the links-only key may do: read links, and change a link's destination/label. */
+function linksKeyMay(request, url) {
+  const m = /^\/api\/links(?:\/([A-Za-z0-9]+))?\/?$/.exec(url.pathname);
+  if (!m) return false;
+  return request.method === 'GET' || (request.method === 'PATCH' && !!m[1]);
 }
 
 async function readJson(request, maxBytes = MAX_BODY_BYTES) {
@@ -208,15 +227,30 @@ function ensureSchema(db) {
          )`,
       ),
     ])
-    // Added later: tables created before it get the column here.
-    .then(() => db.prepare('ALTER TABLE designs ADD COLUMN image TEXT').run().catch((e) => {
-      if (!/duplicate column/i.test(String(e?.message ?? e))) throw e;
-    }))
+    // Added later: tables created before them get the columns here.
+    .then(() => addColumn(db, 'designs', 'image TEXT'))
+    .then(() => addColumn(db, 'designs', 'public_id TEXT'))
+    // Unguessable ids for public embeds; give older designs one too.
+    .then(() => db.batch([
+      db.prepare("UPDATE designs SET public_id = lower(hex(randomblob(10))) WHERE public_id IS NULL"),
+      db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS designs_public_id ON designs (public_id)'),
+    ]))
     .catch((e) => {
       schemaReady = null;
       throw e;
     });
   return schemaReady;
+}
+
+function addColumn(db, table, column) {
+  return db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column}`).run().catch((e) => {
+    if (!/duplicate column/i.test(String(e?.message ?? e))) throw e;
+  });
+}
+
+/** 20 hex characters (80 random bits): the public id in /d/<id>.svg. */
+function newPublicId() {
+  return [...crypto.getRandomValues(new Uint8Array(10))].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function publicBase(request, env) {
@@ -245,6 +279,7 @@ function presentDesign(row, base, { withSvg = false } = {}) {
     details: row.details,
     text: row.text,
     link: row.link_id ? { code: encodeId(row.link_id), short: `${base}/c/${encodeId(row.link_id)}`, url: row.link_url ?? null } : null,
+    embed: row.public_id ? `${base}/d/${row.public_id}.svg` : null,
     meta,
     created_at: row.created_at,
   };
@@ -282,7 +317,7 @@ async function redirect(request, env, ctx, rawCode) {
 
 async function designsApi(request, env, url, base, rawId) {
   const db = env.DB;
-  const select = `SELECT d.id, d.name, d.details, d.text, d.link_id, d.meta, d.created_at, l.url AS link_url %SVG%
+  const select = `SELECT d.id, d.name, d.details, d.text, d.link_id, d.meta, d.created_at, d.public_id, l.url AS link_url %SVG%
                   FROM designs d LEFT JOIN links l ON l.id = d.link_id`;
   if (rawId === undefined) {
     if (request.method === 'POST') {
@@ -293,8 +328,8 @@ async function designsApi(request, env, url, base, rawId) {
       const svg = parseSvg(body.svg);
       const meta = parseMeta(body.meta);
       const image = parseImage(body.image);
-      const { id } = await db.prepare('INSERT INTO designs (name, details, text, link_id, svg, meta, image, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id')
-        .bind(name, details, text, linkIdFor(text, request, env), svg, meta, image, Math.floor(Date.now() / 1000))
+      const { id } = await db.prepare('INSERT INTO designs (name, details, text, link_id, svg, meta, image, public_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id')
+        .bind(name, details, text, linkIdFor(text, request, env), svg, meta, image, newPublicId(), Math.floor(Date.now() / 1000))
         .first();
       const row = await db.prepare(`${select.replace('%SVG%', '')} WHERE d.id = ?`).bind(id).first();
       return json(presentDesign(row, base), 201);
@@ -342,9 +377,32 @@ async function designsApi(request, env, url, base, rawId) {
   return json({ error: 'Method not allowed' }, 405, { Allow: 'GET, PATCH, DELETE' });
 }
 
+/**
+ * A saved design's SVG at its unguessable public id, for <img> embeds on other
+ * sites. Replacing the design in the editor updates every embed (short cache).
+ */
+async function embed(request, env, publicId) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
+  await ensureSchema(env.DB);
+  const row = await env.DB.prepare('SELECT svg FROM designs WHERE public_id = ?').bind(publicId).first();
+  if (!row) return new Response('Not found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
+  return new Response(request.method === 'HEAD' ? null : row.svg, {
+    headers: {
+      'Content-Type': 'image/svg+xml; charset=utf-8',
+      'Cache-Control': 'public, max-age=300',
+      'Access-Control-Allow-Origin': '*',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+      'X-Content-Type-Options': 'nosniff',
+      // Saved SVGs are validated on save; this is belt and braces if one is opened directly.
+      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    },
+  });
+}
+
 async function api(request, env, url) {
-  const denied = await requireAdmin(request, env);
-  if (denied) return denied;
+  const role = await authorize(request, env);
+  if (role instanceof Response) return role;
+  if (role === 'links' && !linksKeyMay(request, url)) return json({ error: 'This key can only read links and change their destination' }, 403);
   await ensureSchema(env.DB);
   const base = publicBase(request, env);
   const d = /^\/api\/designs(?:\/([^/]+))?\/?$/.exec(url.pathname);
@@ -377,6 +435,10 @@ async function api(request, env, url) {
   const id = decodeCode(code.toLowerCase());
   if (id === null) return json({ error: 'Not found' }, 404);
 
+  if (request.method === 'GET') {
+    const row = await env.DB.prepare('SELECT id, url, label, created_at, hits, last_hit FROM links WHERE id = ?').bind(id).first();
+    return row ? json(present(row, base)) : json({ error: 'Not found' }, 404);
+  }
   if (request.method === 'PATCH') {
     const body = await readJson(request);
     const sets = [];
@@ -393,7 +455,7 @@ async function api(request, env, url) {
     const res = await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id).run();
     return res.meta?.changes ? json({ deleted: encodeId(id) }) : json({ error: 'Not found' }, 404);
   }
-  return json({ error: 'Method not allowed' }, 405, { Allow: 'PATCH, DELETE' });
+  return json({ error: 'Method not allowed' }, 405, { Allow: 'GET, PATCH, DELETE' });
 }
 
 export default {
@@ -403,6 +465,9 @@ export default {
       const short = /^\/c\/([A-Za-z0-9]+)\/?$/.exec(url.pathname);
       if (short) return await redirect(request, env, ctx, short[1]);
       if (url.pathname.startsWith('/c/') || url.pathname === '/c') return notFound();
+      const d = /^\/d\/([0-9a-f]{20})\.svg$/.exec(url.pathname);
+      if (d) return await embed(request, env, d[1]);
+      if (url.pathname.startsWith('/d/')) return notFound();
       if (url.pathname.startsWith('/api/')) return await api(request, env, url);
       return env.ASSETS ? env.ASSETS.fetch(request) : notFound();
     } catch (e) {

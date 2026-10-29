@@ -13,9 +13,9 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    // The Worker only runs for short links and the admin API; the site itself
-    // is served straight from static assets (free, no Worker invocation).
-    "run_worker_first": ["/c/*", "/api/*"]
+    // The Worker only runs for short links, design embeds and the API; the site
+    // itself is served straight from static assets (free, no Worker invocation).
+    "run_worker_first": ["/c/*", "/d/*", "/api/*"]
   },
   "d1_databases": [
     // No database_id: `wrangler deploy` creates and binds the database for you.
