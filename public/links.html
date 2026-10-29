@@ -17,11 +17,15 @@
 
   <main class="stack">
     <section class="panel" aria-label="Sign in">
-      <div class="field">
+      <form class="field" id="signin" method="post" action="#">
         <label for="token">Admin token</label>
-        <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
+        <input type="text" name="username" value="admin" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">
+        <div class="row nowrap">
+          <input id="token" name="password" type="password" autocomplete="current-password" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
+          <button type="submit" class="small">Sign in</button>
+        </div>
         <label class="check"><input id="remember" type="checkbox"> Remember on this device</label>
-      </div>
+      </form>
     </section>
 
     <section class="panel" aria-label="Create">

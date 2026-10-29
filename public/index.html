@@ -155,7 +155,8 @@
               <textarea id="saveDetails" maxlength="2000" rows="2" placeholder="Details (optional): where it's used, print size…"></textarea>
               <input id="saveAuthor" type="text" maxlength="200" list="authorList" autocomplete="off" placeholder="Author (optional): whose code this is; other projects list codes by author">
               <datalist id="authorList"></datalist>
-              <input id="saveToken" type="password" autocomplete="off" placeholder="Admin token" hidden>
+              <input type="text" name="username" value="admin" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">
+              <input id="saveToken" name="password" type="password" autocomplete="current-password" placeholder="Admin token" hidden>
               <div class="row"><button type="submit" class="primary" id="replaceBtn" value="replace" hidden>Replace</button><button type="submit" class="primary" id="saveNew" value="new">Save</button><span id="saveMsg" class="hint"></span></div>
             </form>
           </div>

@@ -121,6 +121,10 @@ $('copyAdmin').addEventListener('click', () => {
   copy($('token').value, 'Admin token copied.');
 });
 
+$('signin').addEventListener('submit', (e) => {
+  e.preventDefault();
+  $('token').dispatchEvent(new Event('change'));
+});
 $('token').addEventListener('change', () => {
   token = $('token').value.trim();
   store('sessionStorage')?.setItem('adminToken', token);

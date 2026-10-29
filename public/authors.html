@@ -16,16 +16,18 @@
   </header>
   <main class="stack">
     <section class="panel" aria-label="Sign in">
-      <div class="field">
+      <form class="field" id="signin" method="post" action="#">
         <label for="token">Admin token</label>
+        <input type="text" name="username" value="admin" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">
         <div class="row nowrap">
-          <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
+          <input id="token" name="password" type="password" autocomplete="current-password" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
+          <button type="submit" class="small">Sign in</button>
           <button type="button" class="small" id="showAdmin">Show</button>
           <button type="button" class="small" id="copyAdmin">Copy</button>
         </div>
         <label class="check"><input id="remember" type="checkbox"> Remember on this device</label>
         <p class="hint">This is the token you sign in with. It is a Cloudflare secret the server never sends out, so this shows the copy saved in this browser. Lost it? Set a new one with <code>npx wrangler secret put ADMIN_TOKEN</code>.</p>
-      </div>
+      </form>
     </section>
 
     <section class="panel" aria-label="Add an author">
