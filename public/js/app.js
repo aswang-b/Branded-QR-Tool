@@ -12,6 +12,10 @@ const GOOD = 0.9; // reliability considered "phone-safe"
 
 let source = null;      // {el, w, h, name}
 let square = null;      // {data, width, height} RGBA square derived from `source`
+let squareCanvas = null; // the same square, for saving the logo with a design
+let editing = null;     // {id, name} of the saved code being edited (?edit=<id>)
+let lastSettings = null; // form settings and logo the current candidates were made with
+let lastLogo = null;
 let worker = null;
 let jobId = 0;
 let candidates = [];
@@ -58,7 +62,7 @@ function demoCanvas() {
 }
 
 function makeSquare() {
-  if (!source) { square = null; return; }
+  if (!source) { square = null; squareCanvas = null; return; }
   const c = document.createElement('canvas');
   c.width = c.height = SQUARE_PX;
   const g = c.getContext('2d', { willReadFrequently: true });
@@ -72,6 +76,20 @@ function makeSquare() {
   }
   const d = g.getImageData(0, 0, SQUARE_PX, SQUARE_PX);
   square = { data: d.data, width: d.width, height: d.height };
+  squareCanvas = c;
+}
+
+/** The square logo as a PNG data URL small enough to save with a design (null without an image). */
+function logoDataUrl() {
+  if (!squareCanvas) return null;
+  for (const px of [SQUARE_PX, 256, 128]) {
+    const c = document.createElement('canvas');
+    c.width = c.height = px;
+    c.getContext('2d').drawImage(squareCanvas, 0, 0, px, px);
+    const url = c.toDataURL('image/png');
+    if (url.length <= 300_000) return url;
+  }
+  return null;
 }
 
 function setSource(el, w, h, name) {
@@ -82,13 +100,20 @@ function setSource(el, w, h, name) {
   markStale();
 }
 
+// The load event rather than img.decode(): decode() can stall until the page
+// paints, e.g. in a background tab.
+const loadImage = (src) => new Promise((resolve, reject) => {
+  const img = new Image();
+  img.onload = () => resolve(img);
+  img.onerror = () => reject(new Error('Could not read that image.'));
+  img.src = src;
+});
+
 async function loadFile(file) {
   if (!file || !file.type.startsWith('image/')) return setNote('That file is not an image.');
   const url = URL.createObjectURL(file);
   try {
-    const img = new Image();
-    img.src = url;
-    await img.decode();
+    const img = await loadImage(url);
     setSource(img, img.naturalWidth || SQUARE_PX, img.naturalHeight || SQUARE_PX, file.name);
   } catch {
     URL.revokeObjectURL(url);
@@ -147,9 +172,30 @@ function markStale() {
 
 // ------------------------------------------------------------------ generation
 
+// Everything needed to regenerate a saved code later (stored in its meta).
+const SETTING_IDS = ['imgsize', 'fill', 'fit', 'shape', 'eyes', 'contrast', 'dotScale', 'fg', 'bg', 'tintLight', 'quiet', 'printMm', 'distance'];
+
+function readSettings() {
+  return Object.fromEntries(SETTING_IDS.map((id) => [id, $(id).type === 'checkbox' ? $(id).checked : $(id).value]));
+}
+
+function applySettings(settings) {
+  for (const [id, v] of Object.entries(settings)) {
+    const el = SETTING_IDS.includes(id) ? $(id) : null;
+    if (!el || v == null) continue;
+    if (el.type === 'checkbox') el.checked = !!v;
+    else if (el.tagName !== 'SELECT' || [...el.options].some((o) => o.value === String(v))) el.value = String(v);
+  }
+  syncLabels();
+  checkColors();
+  makeSquare();
+}
+
 function generate() {
   const req = readRequest();
   if (!req.link) return setNote('Enter a link first.');
+  lastSettings = readSettings();
+  lastLogo = logoDataUrl();
   worker?.terminate();
   worker = new Worker(new URL('./gen-worker.js', import.meta.url), { type: 'module' });
   const my = ++jobId;
@@ -350,6 +396,7 @@ function exportSvg() {
 async function save(e) {
   e.preventDefault();
   if (!selected) return;
+  const replace = editing && e.submitter?.value === 'replace';
   const msg = $('saveMsg');
   if (!getToken()) {
     const t = $('saveToken').value.trim();
@@ -358,9 +405,9 @@ async function save(e) {
   }
   const c = selected;
   try {
-    msg.textContent = 'Saving…';
-    await api('/api/designs', {
-      method: 'POST',
+    msg.textContent = replace ? 'Replacing…' : 'Saving…';
+    const saved = await api(replace ? `/api/designs/${editing.id}` : '/api/designs', {
+      method: replace ? 'PATCH' : 'POST',
       body: {
         name: $('saveName').value,
         details: $('saveDetails').value,
@@ -371,10 +418,13 @@ async function save(e) {
           reliability: c.score.reliability, byDecoder: c.score.byDecoder, minMm: c.score.minMm,
           match: c.match, printMm: lastPrint.mm, distanceMm: lastPrint.distanceMm, atPrint: c.score.atPrint,
           style: { shape: c.style.shape, eyes: c.style.eyes, dotScale: c.style.dotScale, maxLum: c.style.maxLum },
+          link: c.link, settings: lastSettings,
         },
+        image: lastLogo,
       },
     });
-    msg.innerHTML = 'Saved. <a href="saved.html">See saved codes</a>';
+    msg.innerHTML = `${replace ? 'Replaced' : 'Saved'}. <a href="saved.html">See saved codes</a>`;
+    if (replace) setEditing({ id: saved.id, name: saved.name });
     $('saveToken').hidden = true;
   } catch (err) {
     msg.textContent = err.message;
@@ -428,11 +478,59 @@ window.addEventListener('paste', (e) => {
   if (f) loadFile(f);
 });
 
-const presetText = new URLSearchParams(location.search).get('text');
+// ------------------------------------------------------------------ editing a saved code
+
+function setEditing(d) {
+  editing = d;
+  $('editBanner').hidden = !d;
+  $('replaceBtn').hidden = !d;
+  $('saveNew').textContent = d ? 'Save as new' : 'Save';
+  $('saveNew').classList.toggle('primary', !d);
+  if (!d) return;
+  $('editName').textContent = d.name;
+  $('replaceBtn').textContent = `Replace "${d.name}"`;
+  document.title = `Editing ${d.name} · Branded QR`;
+}
+
+/** Open a saved code in the editor: same link, logo and settings, then generate. */
+async function loadForEdit(id) {
+  if (!getToken()) {
+    const t = prompt('Admin token (to open a saved code):') || '';
+    if (!t.trim()) return setNote('Enter your admin token to edit a saved code.');
+    setToken(t.trim());
+  }
+  let d;
+  try {
+    d = await api(`/api/designs/${encodeURIComponent(id)}`);
+  } catch (err) {
+    return setNote(`Could not open saved code ${id}: ${err.message}`);
+  }
+  const m = d.meta || {};
+  // Fragment-shaped codes encode link#<shaping characters>: edit the link itself.
+  $('text').value = m.link || (/^https?:\/\//i.test(d.text) ? d.text.split('#')[0] : d.text);
+  const old = m.style || {};
+  applySettings(m.settings || {
+    shape: old.shape, eyes: old.eyes, dotScale: old.dotScale && Math.round(old.dotScale * 100),
+    contrast: old.maxLum, printMm: m.printMm, distance: m.distanceMm,
+  });
+  $('saveName').value = d.name;
+  $('saveDetails').value = d.details || '';
+  setEditing({ id: d.id, name: d.name });
+  if (d.image) {
+    try { setSource(await loadImage(d.image), SQUARE_PX, SQUARE_PX, 'Logo saved with this code'); } catch { /* keep the default */ }
+  } else {
+    setNote('This code was saved before logos were stored with codes, so the B logo is used. Choose the original image if it was different.');
+  }
+  generate();
+}
+
+const params = new URLSearchParams(location.search);
+const presetText = params.get('text');
 if (presetText) $('text').value = presetText;
 syncLabels();
 checkColors();
 setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'dancewithb.fun logo');
+if (params.get('edit')) loadForEdit(params.get('edit'));
 
 // The settings column scrolls on its own (desktop layout); size it to the
 // space actually left in the window so its bottom, with Generate, stays visible.

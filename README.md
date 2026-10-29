@@ -35,6 +35,10 @@ not a sticker placed on top. Upload any square image, enter a link, download a P
    The **Recommended** pick in each set is the best-looking design that is still phone-safe at
    your print size. Click any design to see a scan rate for each print width, download PNG/SVG,
    or **Save** it with a name and details (see *Saved codes*).
+6. **Edit a saved code.** On *Saved codes*, **Edit** opens the code in the generator with its link,
+   logo and settings, and generates fresh designs. Pick one and **Replace** the saved code, or
+   **Save as new** to keep a variation alongside it. Codes saved before logos were stored open with
+   the default logo; choose the original image if it differs.
 
 **Always test the final print with a few real phones** (see *Testing scan reliability*).
 
@@ -129,8 +133,10 @@ Worker redirects (HTTP 302) to wherever that code currently points.
   later, delete, and see scan counts. "QR" opens the maker with the short URL filled in.
 - **API** (all need `Authorization: Bearer <ADMIN_TOKEN>`):
   `POST /api/links {url, label?}`, `GET /api/links`, `PATCH /api/links/<code> {url?, label?}`,
-  `DELETE /api/links/<code>`; saved designs: `POST /api/designs {name, details?, text, svg, meta?}`,
-  `GET /api/designs`, `GET|PATCH|DELETE /api/designs/<id>`. Saved SVGs containing scripts, event
+  `DELETE /api/links/<code>`; saved designs: `POST /api/designs {name, details?, text, svg, meta?, image?}`,
+  `GET /api/designs`, `GET|PATCH|DELETE /api/designs/<id>` (`PATCH` renames, edits details, or
+  replaces the code with `text` + `svg`, plus `meta`/`image`). `image` is the source logo as a
+  PNG data URL (at most 300 kB), kept so the editor can regenerate the code. Saved SVGs containing scripts, event
   handlers or links are rejected. Only `http(s)` destinations are accepted, so the endpoint can't be
   used for `javascript:` links. Without `ADMIN_TOKEN` set, the API refuses everything.
 - **Storage** is one D1 table, created automatically on first use. Each scan costs one read and one

@@ -17,6 +17,7 @@
 
   <main class="layout">
     <section class="panel controls" aria-label="Settings">
+      <p class="edit-banner" id="editBanner" hidden>Editing <strong id="editName"></strong>: generate new designs, then replace it or save one as a new code. <a href="index.html">Stop editing</a></p>
       <div class="field">
         <label for="text">Link</label>
         <div class="row nowrap">
@@ -153,7 +154,7 @@
               <input id="saveName" type="text" maxlength="100" placeholder="Name, e.g. Class check-in sticker" required>
               <textarea id="saveDetails" maxlength="2000" rows="2" placeholder="Details (optional): where it's used, print size…"></textarea>
               <input id="saveToken" type="password" autocomplete="off" placeholder="Admin token" hidden>
-              <div class="row"><button type="submit" class="primary">Save</button><span id="saveMsg" class="hint"></span></div>
+              <div class="row"><button type="submit" class="primary" id="replaceBtn" value="replace" hidden>Replace</button><button type="submit" class="primary" id="saveNew" value="new">Save</button><span id="saveMsg" class="hint"></span></div>
             </form>
           </div>
         </div>

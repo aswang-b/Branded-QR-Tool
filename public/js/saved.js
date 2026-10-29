@@ -42,9 +42,13 @@ async function pngFromSvg(svg, px) {
   // SVGs are only ever loaded through <img>, which never runs scripts
   const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
   try {
-    const img = new Image();
-    img.src = url;
-    await img.decode();
+    // load event, not img.decode(): decode() can stall until the page paints
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error('Could not render that design.'));
+      i.src = url;
+    });
     const c = document.createElement('canvas');
     c.width = c.height = px;
     c.getContext('2d').drawImage(img, 0, 0, px, px);
@@ -91,14 +95,9 @@ function render(designs) {
     actions.append(
       btn('PNG', async () => download(await pngFromSvg(await getSvg(), 2048), `${fileBase(d)}.png`), 'primary'),
       btn('SVG', async () => download(new Blob([await getSvg()], { type: 'image/svg+xml' }), `${fileBase(d)}.svg`)),
-      btn('Edit', async () => {
-        const name = prompt('Name', d.name);
-        if (name === null) return;
-        const details = prompt('Details', d.details);
-        if (details === null) return;
-        await api(`/api/designs/${d.id}`, { method: 'PATCH', body: { name, details } });
-        await load();
-      }),
+      // Opens the code in the generator: same link, logo and settings, ready to
+      // regenerate and replace this code or save a variation as a new one.
+      btn('Edit', async () => { location.href = `index.html?edit=${d.id}`; }),
       btn('Delete', async () => {
         if (!confirm(`Delete "${d.name}"? This removes the saved design only; any short link keeps working.`)) return;
         await api(`/api/designs/${d.id}`, { method: 'DELETE' });

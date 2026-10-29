@@ -82,6 +82,9 @@ button.link { padding: 0; border: 0; background: none; color: var(--accent); tex
   background: repeating-conic-gradient(var(--line) 0% 25%, transparent 0% 50%) 50% / 16px 16px;
 }
 .status { margin: 12px 0 2px; font-weight: 600; }
+.edit-banner { margin: 0 0 14px; padding: 10px 12px; border-radius: 10px; font-size: .85rem;
+  background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+.edit-banner a { color: var(--accent); }
 .status.ok { color: var(--ok); }
 .status.warn { color: var(--warn); }
 .status.bad { color: var(--bad); }

@@ -58,7 +58,10 @@ const freePort = () => new Promise((resolve, reject) => {
 async function startWorker(vars = {}) {
   const port = await freePort();
   const state = fs.mkdtempSync(path.join(os.tmpdir(), 'qr-worker-'));
-  const args = ['dev', '--port', String(port), '--ip', '127.0.0.1', '--inspector-port', '0', '--persist-to', state, '--log-level', 'error',
+  // An empty env file stops a developer's local .dev.vars (e.g. ADMIN_TOKEN) leaking into tests.
+  const envFile = path.join(state, 'empty.env');
+  fs.writeFileSync(envFile, '');
+  const args = ['dev', '--port', String(port), '--ip', '127.0.0.1', '--inspector-port', '0', '--persist-to', state, '--log-level', 'error', '--env-file', envFile,
     // The custom-domain route in wrangler.jsonc would otherwise make local requests
     // look like they came from qr.dancewithb.fun.
     '--local-upstream', `127.0.0.1:${port}`];
@@ -300,6 +303,9 @@ test('designs: require the token and validate input', async () => {
     { name: 'x', text: 'x', svg: SVG.replace('<rect ', '<a href="javascript:alert(1)"/><rect ') },
     { name: 'x', text: 'x', svg: SVG, meta: [1, 2] },
     { name: 'x', text: 'x', svg: SVG, details: 'd'.repeat(2001) },
+    { name: 'x', text: 'x', svg: SVG, image: 'data:image/svg+xml;base64,PHN2Zz4=' }, // logos are PNG only
+    { name: 'x', text: 'x', svg: SVG, image: 'data:image/png;base64,<script>' },
+    { name: 'x', text: 'x', svg: SVG, image: 'data:image/png;base64,' + 'A'.repeat(300_001) },
   ];
   for (const body of bad) {
     r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify(body) });
@@ -311,6 +317,39 @@ test('designs: require the token and validate input', async () => {
     assert.equal(r.status, 404, id);
     await r.arrayBuffer();
   }
+});
+
+test('designs: the editor can replace a saved code and keeps its logo', async () => {
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+  let r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'Sticker', text: 'https://example.com/#a', svg: SVG, image: PNG, meta: { v: 1 } }) });
+  assert.equal(r.status, 201);
+  const { id } = await r.json();
+  r = await call(`/api/designs/${id}`, { headers: auth });
+  assert.equal((await r.json()).image, PNG);
+
+  // text and svg must come together
+  r = await call(`/api/designs/${id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ text: 'https://example.com/#b' }) });
+  assert.equal(r.status, 400);
+  await r.arrayBuffer();
+
+  const SVG2 = SVG.replace('#000', '#e8365d');
+  const text = `${w.base}/c/a#XyZ`;
+  r = await call(`/api/designs/${id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ name: 'Sticker v2', text, svg: SVG2, meta: { v: 2 } }) });
+  assert.equal(r.status, 200);
+  const replaced = await r.json();
+  assert.equal(replaced.name, 'Sticker v2');
+  assert.equal(replaced.text, text);
+  assert.equal(replaced.link.code, 'a'); // now linked to the short link
+  assert.deepEqual(replaced.meta, { v: 2 });
+  r = await call(`/api/designs/${id}`, { headers: auth });
+  const full = await r.json();
+  assert.equal(full.svg, SVG2);
+  assert.equal(full.image, PNG); // untouched when not sent
+
+  // designs saved before logos were stored come back with image: null
+  r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'Old', text: 'x', svg: SVG }) });
+  r = await call(`/api/designs/${(await r.json()).id}`, { headers: auth });
+  assert.equal((await r.json()).image, null);
 });
 
 test('designs: realistic generated SVGs fit', async () => {

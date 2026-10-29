@@ -7,8 +7,8 @@
 //   DELETE /api/links/<code>  delete                             (admin)
 //   POST /api/designs         save a generated QR design          (admin)
 //   GET  /api/designs         list saved designs (no SVG)          (admin)
-//   GET  /api/designs/<id>    one design, with its SVG             (admin)
-//   PATCH /api/designs/<id>   rename / edit details                (admin)
+//   GET  /api/designs/<id>    one design, with its SVG and logo    (admin)
+//   PATCH /api/designs/<id>   rename, edit details, or replace the code (admin)
 //   DELETE /api/designs/<id>  delete                               (admin)
 //
 // Everything else is served from the static assets (see wrangler.jsonc: the
@@ -27,12 +27,13 @@ const MAX_CODE_LENGTH = 9; // 36^9 < 2^53, so ids stay exact
 const MAX_URL_LENGTH = 2048;
 const MAX_LABEL_LENGTH = 100;
 const MAX_BODY_BYTES = 8 * 1024;
-const MAX_DESIGN_BODY_BYTES = 1_600_000; // D1 rows top out around 2 MB
+const MAX_DESIGN_BODY_BYTES = 1_900_000; // D1 rows top out around 2 MB
 const MAX_SVG_LENGTH = 1_500_000;
 const MAX_NAME_LENGTH = 100;
 const MAX_DETAILS_LENGTH = 2000;
 const MAX_TEXT_LENGTH = 4296; // largest QR payload
 const MAX_META_LENGTH = 16 * 1024;
+const MAX_IMAGE_LENGTH = 300_000; // source logo, as a PNG data URL
 
 // ---------------------------------------------------------------- codes
 
@@ -151,6 +152,14 @@ function parseSvg(value) {
   return v;
 }
 
+/** The source logo, kept so a design can be regenerated: a base64 PNG data URL only. */
+function parseImage(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || value.length > MAX_IMAGE_LENGTH || !/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/.test(value))
+    throw new HttpError(400, `"image" must be a PNG data URL of at most ${MAX_IMAGE_LENGTH} characters`);
+  return value;
+}
+
 function parseMeta(value) {
   if (value === undefined) return '{}';
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new HttpError(400, '"meta" must be an object');
@@ -199,6 +208,10 @@ function ensureSchema(db) {
          )`,
       ),
     ])
+    // Added later: tables created before it get the column here.
+    .then(() => db.prepare('ALTER TABLE designs ADD COLUMN image TEXT').run().catch((e) => {
+      if (!/duplicate column/i.test(String(e?.message ?? e))) throw e;
+    }))
     .catch((e) => {
       schemaReady = null;
       throw e;
@@ -235,7 +248,7 @@ function presentDesign(row, base, { withSvg = false } = {}) {
     meta,
     created_at: row.created_at,
   };
-  if (withSvg) out.svg = row.svg;
+  if (withSvg) { out.svg = row.svg; out.image = row.image ?? null; }
   return out;
 }
 
@@ -279,8 +292,9 @@ async function designsApi(request, env, url, base, rawId) {
       const text = parseText(body.text, 'text', MAX_TEXT_LENGTH);
       const svg = parseSvg(body.svg);
       const meta = parseMeta(body.meta);
-      const { id } = await db.prepare('INSERT INTO designs (name, details, text, link_id, svg, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id')
-        .bind(name, details, text, linkIdFor(text, request, env), svg, meta, Math.floor(Date.now() / 1000))
+      const image = parseImage(body.image);
+      const { id } = await db.prepare('INSERT INTO designs (name, details, text, link_id, svg, meta, image, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id')
+        .bind(name, details, text, linkIdFor(text, request, env), svg, meta, image, Math.floor(Date.now() / 1000))
         .first();
       const row = await db.prepare(`${select.replace('%SVG%', '')} WHERE d.id = ?`).bind(id).first();
       return json(presentDesign(row, base), 201);
@@ -297,16 +311,25 @@ async function designsApi(request, env, url, base, rawId) {
   const id = /^[1-9][0-9]{0,15}$/.test(rawId) ? Number(rawId) : null;
   if (!id) return json({ error: 'Not found' }, 404);
   if (request.method === 'GET') {
-    const row = await db.prepare(`${select.replace('%SVG%', ', d.svg')} WHERE d.id = ?`).bind(id).first();
+    const row = await db.prepare(`${select.replace('%SVG%', ', d.svg, d.image')} WHERE d.id = ?`).bind(id).first();
     return row ? json(presentDesign(row, base, { withSvg: true })) : json({ error: 'Not found' }, 404);
   }
   if (request.method === 'PATCH') {
-    const body = await readJson(request);
+    const body = await readJson(request, MAX_DESIGN_BODY_BYTES);
     const sets = [];
     const args = [];
     if (body.name !== undefined) { sets.push('name = ?'); args.push(parseText(body.name, 'name', MAX_NAME_LENGTH)); }
     if (body.details !== undefined) { sets.push('details = ?'); args.push(parseText(body.details, 'details', MAX_DETAILS_LENGTH, { required: false })); }
-    if (!sets.length) throw new HttpError(400, 'Nothing to update: send "name" and/or "details"');
+    // Replacing the code itself (from the editor) sends text and svg together.
+    if ((body.text === undefined) !== (body.svg === undefined)) throw new HttpError(400, 'Send "text" and "svg" together to replace the code');
+    if (body.text !== undefined) {
+      const text = parseText(body.text, 'text', MAX_TEXT_LENGTH);
+      sets.push('text = ?', 'link_id = ?', 'svg = ?');
+      args.push(text, linkIdFor(text, request, env), parseSvg(body.svg));
+    }
+    if (body.meta !== undefined) { sets.push('meta = ?'); args.push(parseMeta(body.meta)); }
+    if (body.image !== undefined) { sets.push('image = ?'); args.push(parseImage(body.image)); }
+    if (!sets.length) throw new HttpError(400, 'Nothing to update: send "name", "details", or "text" + "svg"');
     const res = await db.prepare(`UPDATE designs SET ${sets.join(', ')} WHERE id = ?`).bind(...args, id).run();
     if (!res.meta?.changes) return json({ error: 'Not found' }, 404);
     const row = await db.prepare(`${select.replace('%SVG%', '')} WHERE d.id = ?`).bind(id).first();
