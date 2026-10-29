@@ -8,11 +8,12 @@ $('remember').checked = !!store('localStorage')?.getItem('adminToken');
 
 const setMsg = (text, kind = '') => { $('msg').textContent = text; $('msg').className = 'status ' + kind; };
 
-async function api(path, { method = 'GET', body } = {}) {
-  const res = await fetch(path, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
+/** Calls an API method, e.g. api('link.update', { code, url }) (see src/worker.js). */
+async function api(method, params = {}) {
+  const res = await fetch(`/api/${method}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(res.status === 401 ? 'Wrong admin token.' : data.error || `Request failed (${res.status})`);
@@ -88,11 +89,11 @@ function render(designs) {
     if (m.printMm) fact(`At ${m.printMm} mm`, pct(m.atPrint));
     if (d.link) fact('Short link', `/c/${d.link.code} → ${d.link.url ?? '(deleted)'}`);
     fact('Saved', new Date(d.created_at * 1000).toLocaleString());
-    if (d.svg_url) fact('Image link (API key)', d.svg_url);
+    if (d.author) fact('Author', d.author);
     info.append(facts, el('p', 'hint mono', d.text));
 
     let svg = null;
-    const getSvg = async () => (svg ??= (await api(`/api/designs/${d.id}`)).svg);
+    const getSvg = async () => (svg ??= (await api('qr.read', { id: d.id })).svg);
     getSvg().then((s) => { img.src = URL.createObjectURL(new Blob([s], { type: 'image/svg+xml' })); }).catch(() => {});
 
     const actions = el('div', 'actions');
@@ -105,15 +106,13 @@ function render(designs) {
     actions.append(
       btn('PNG', async () => download(await pngFromSvg(await getSvg(), 2048), `${fileBase(d)}.png`), 'primary'),
       btn('SVG', async () => download(new Blob([await getSvg()], { type: 'image/svg+xml' }), `${fileBase(d)}.svg`)),
-      // Stable address of this code's SVG for other projects' servers, which
-      // fetch it with the API key; replacing the code updates what it returns.
-      ...(d.svg_url ? [btn('Copy image link', async () => copy(d.svg_url, 'Image link copied. Fetch it with the API key (see README).'))] : []),
+      btn('Copy id', async () => copy(String(d.id), `Copied id ${d.id}: other projects fetch the image with qr.read {id: ${d.id}, format: "svg"}.`)),
       // Opens the code in the generator: same link, logo and settings, ready to
       // regenerate and replace this code or save a variation as a new one.
       btn('Edit', async () => { location.href = `index.html?edit=${d.id}`; }),
       btn('Delete', async () => {
         if (!confirm(`Delete "${d.name}"? This removes the saved design only; any short link keeps working.`)) return;
-        await api(`/api/designs/${d.id}`, { method: 'DELETE' });
+        await api('qr.delete', { id: d.id });
         await load();
       }),
     );
@@ -128,7 +127,8 @@ async function load() {
   if (!token) return setMsg('Enter your admin token to see saved codes.', 'warn');
   try {
     setMsg('Loading…');
-    render((await api('/api/designs?limit=200')).designs);
+    const author = $('author').value.trim();
+    render((await api('qr.read', { limit: 200, ...(author ? { author } : {}) })).designs);
   } catch (e) {
     $('list').replaceChildren();
     setMsg(e.message, 'bad');
@@ -139,6 +139,13 @@ $('token').addEventListener('change', () => {
   token = $('token').value.trim();
   store('sessionStorage')?.setItem('adminToken', token);
   if ($('remember').checked) store('localStorage')?.setItem('adminToken', token);
+  load();
+});
+$('author').value = new URLSearchParams(location.search).get('author') || '';
+$('author').addEventListener('change', () => {
+  const u = new URL(location.href);
+  if ($('author').value.trim()) u.searchParams.set('author', $('author').value.trim()); else u.searchParams.delete('author');
+  history.replaceState(null, '', u);
   load();
 });
 $('remember').addEventListener('change', () => {

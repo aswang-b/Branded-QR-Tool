@@ -123,22 +123,37 @@ test('static site is still served (not through the redirect logic)', async () =>
   await js.arrayBuffer();
 });
 
-test('admin API requires the token', async () => {
+// ---------------------------------------------------------------- the API: <domain>.<create|read|update|delete>
+
+/** POST /api/<method> with JSON params (auth: the admin token unless given). */
+const rpc = (method, params = {}, headers = auth, worker = w) =>
+  worker.call(`/api/${method}`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(params) });
+const key = { Authorization: `Bearer ${API_TOKEN}` };
+async function expectStatus(res, status, msg) {
+  assert.equal(res.status, status, msg);
+  await res.arrayBuffer();
+}
+
+test('the API requires a token', async () => {
   for (const headers of [{}, { Authorization: 'Bearer nope' }, { Authorization: TOKEN }]) {
-    const r = await call('/api/links', { headers });
-    assert.equal(r.status, 401);
-    await r.arrayBuffer();
+    await expectStatus(await rpc('link.read', {}, headers), 401);
   }
-  const r = await call('/api/links', { method: 'POST', body: JSON.stringify({ url: 'https://a.example' }) });
-  assert.equal(r.status, 401);
-  await r.arrayBuffer();
+  await expectStatus(await rpc('link.create', { url: 'https://a.example' }, {}), 401);
 });
 
-test('creates links with incrementing codes and redirects to them', async () => {
+test('unknown methods and wrong HTTP verbs', async () => {
+  for (const m of ['links', 'link.list', 'link.read.x', 'qr.image', 'nope.read', 'link.__proto__', 'constructor.read']) {
+    await expectStatus(await rpc(m), 404, m);
+  }
+  await expectStatus(await call('/api/link.create', { headers: auth }), 405); // writes are POST only
+  await expectStatus(await call('/api/link.read', { method: 'DELETE', headers: auth }), 405);
+});
+
+test('link.create: incrementing codes that redirect', async () => {
   const dests = ['https://dancewithb.fun/check-in', 'https://example.com/two?x=1&y=2', 'http://example.org/'];
   const codes = [];
   for (const [i, url] of dests.entries()) {
-    const r = await call('/api/links', { method: 'POST', headers: auth, body: JSON.stringify({ url, label: `link ${i}` }) });
+    const r = await rpc('link.create', { url, label: `link ${i}` });
     assert.equal(r.status, 201);
     const body = await r.json();
     codes.push(body.code);
@@ -156,51 +171,45 @@ test('creates links with incrementing codes and redirects to them', async () => 
   }
 });
 
-test('hit counter and listing', async () => {
+test('link.read: hit counter, one link, and the list (also over GET)', async () => {
   for (let i = 0; i < 3; i++) await (await call('/c/a')).arrayBuffer();
   await (await call('/c/a', { method: 'HEAD' })).arrayBuffer(); // HEAD must not count
   await new Promise((r) => setTimeout(r, 300)); // hits are recorded after the response
-  const r = await call('/api/links', { headers: auth });
-  const { links } = await r.json();
+  const { links } = await (await rpc('link.read')).json();
   assert.deepEqual(links.map((l) => l.code), ['c', 'b', 'a']);
   const a = links.find((l) => l.code === 'a');
   assert.equal(a.hits, 4); // 1 from the previous test + 3 here, HEAD not counted
   assert.ok(a.last_hit > 0);
+
+  const one = await (await rpc('link.read', { code: 'A' })).json(); // case-insensitive
+  assert.equal(one.url, 'https://dancewithb.fun/check-in');
+  const viaGet = await (await call('/api/link.read?code=b', { headers: auth })).json();
+  assert.equal(viaGet.code, 'b');
+  const page = await (await call('/api/link.read?limit=1&offset=1', { headers: auth })).json();
+  assert.deepEqual(page.links.map((l) => l.code), ['b']);
+  for (const code of ['zzzz', 'a-b', '', 42]) await expectStatus(await rpc('link.read', { code }), 404, String(code));
 });
 
-test('unknown, invalid and odd-case codes', async () => {
-  for (const p of ['/c/zzzz', '/c/', '/c', '/c/a-b', '/c/aaaaaaaaaaaa']) {
-    const r = await call(p);
-    assert.equal(r.status, 404, p);
-    await r.arrayBuffer();
-  }
-  const r = await call('/c/A'); // case-insensitive
-  assert.equal(r.status, 302);
-  await r.arrayBuffer();
-  const post = await call('/c/a', { method: 'POST' });
-  assert.equal(post.status, 405);
-  await post.arrayBuffer();
+test('unknown, invalid and odd-case short codes', async () => {
+  for (const p of ['/c/zzzz', '/c/', '/c', '/c/a-b', '/c/aaaaaaaaaaaa']) await expectStatus(await call(p), 404, p);
+  await expectStatus(await call('/c/A'), 302); // case-insensitive
+  await expectStatus(await call('/c/a', { method: 'POST' }), 405);
 });
 
-test('update and delete; deleted codes are never reused', async () => {
-  let r = await call('/api/links/b', { method: 'PATCH', headers: auth, body: JSON.stringify({ url: 'https://example.com/changed' }) });
+test('link.update and link.delete; deleted codes are never reused', async () => {
+  let r = await rpc('link.update', { code: 'b', url: 'https://example.com/changed' });
   assert.equal(r.status, 200);
   assert.equal((await r.json()).url, 'https://example.com/changed');
   r = await call('/c/b');
   assert.equal(r.headers.get('Location'), 'https://example.com/changed#');
   await r.arrayBuffer();
 
-  r = await call('/api/links/c', { method: 'DELETE', headers: auth });
-  assert.equal(r.status, 200);
-  await r.arrayBuffer();
-  r = await call('/c/c');
-  assert.equal(r.status, 404);
-  await r.arrayBuffer();
-  r = await call('/api/links/c', { method: 'DELETE', headers: auth });
-  assert.equal(r.status, 404);
-  await r.arrayBuffer();
+  await expectStatus(await rpc('link.delete', { code: 'c' }), 200);
+  await expectStatus(await call('/c/c'), 404);
+  await expectStatus(await rpc('link.delete', { code: 'c' }), 404);
+  await expectStatus(await rpc('link.update', { code: 'c', url: 'https://example.com/' }), 404);
 
-  r = await call('/api/links', { method: 'POST', headers: auth, body: JSON.stringify({ url: 'https://example.com/after-delete' }) });
+  r = await rpc('link.create', { url: 'https://example.com/after-delete' });
   assert.equal((await r.json()).code, 'd'); // 'c' is not handed out again
 });
 
@@ -210,90 +219,70 @@ test('rejects bad destinations and bodies', async () => {
     { url: `${w.base}/c/a` }, {}, { url: 'https://example.com/' + 'x'.repeat(2100) },
     { url: 'https://example.com', label: 'x'.repeat(101) },
   ];
-  for (const body of bad) {
-    const r = await call('/api/links', { method: 'POST', headers: auth, body: JSON.stringify(body) });
-    assert.equal(r.status, 400, JSON.stringify(body).slice(0, 60));
-    await r.arrayBuffer();
-  }
+  for (const body of bad) await expectStatus(await rpc('link.create', body), 400, JSON.stringify(body).slice(0, 60));
   for (const raw of ['{nope', '[]', 'null']) {
-    const r = await call('/api/links', { method: 'POST', headers: auth, body: raw });
-    assert.equal(r.status, 400, raw);
-    await r.arrayBuffer();
+    await expectStatus(await call('/api/link.create', { method: 'POST', headers: auth, body: raw }), 400, raw);
   }
-  const r = await call('/api/links/b', { method: 'PATCH', headers: auth, body: '{}' });
-  assert.equal(r.status, 400);
-  await r.arrayBuffer();
+  await expectStatus(await rpc('link.update', { code: 'b' }), 400); // nothing to update
 });
 
 test('without ADMIN_TOKEN configured the API fails closed', async () => {
   for (const headers of [{}, { Authorization: 'Bearer ' }, { Authorization: 'Bearer undefined' }]) {
-    const r = await wBare.call('/api/links', { headers });
-    assert.equal(r.status, 503);
-    await r.arrayBuffer();
+    await expectStatus(await rpc('link.read', {}, headers, wBare), 503);
   }
 });
 
 test('PUBLIC_BASE_URL controls the short URL that goes in the QR code', async () => {
-  const r = await wBase.call('/api/links', { method: 'POST', headers: auth, body: JSON.stringify({ url: 'https://example.com' }) });
+  const r = await rpc('link.create', { url: 'https://example.com' }, auth, wBase);
   assert.equal((await r.json()).short, 'https://dancewithb.fun/c/a');
 });
 
 test('a destination with its own fragment keeps it', async () => {
-  let r = await call('/api/links', { method: 'POST', headers: auth, body: JSON.stringify({ url: 'https://example.com/app#/route' }) });
-  const { code } = await r.json();
-  r = await call(`/c/${code}`);
+  const { code } = await (await rpc('link.create', { url: 'https://example.com/app#/route' })).json();
+  const r = await call(`/c/${code}`);
   assert.equal(r.headers.get('Location'), 'https://example.com/app#/route');
   await r.arrayBuffer();
 });
 
-// ---------------------------------------------------------------- saved designs
+// ---------------------------------------------------------------- saved designs (qr.*)
 
 const SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#fff"/><g fill="#000"><rect x="1" y="1" width="1" height="1"/></g></svg>';
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
-test('designs: save, list, fetch, rename, delete', async () => {
+test('qr.create, qr.read, qr.update, qr.delete', async () => {
   // a design whose text is one of our short links (with a shaping fragment) is linked to it
   const text = `${w.base}/c/a#AbC-123_xyz`;
-  let r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({
-    name: 'Check-in sticker', details: 'Pink, 25 mm', text, svg: SVG, meta: { reliability: 0.97, minMm: 21 },
-  }) });
+  let r = await rpc('qr.create', { name: 'Check-in sticker', details: 'Pink, 25 mm', text, svg: SVG, meta: { reliability: 0.97, minMm: 21 } });
   assert.equal(r.status, 201);
   const saved = await r.json();
   assert.equal(saved.name, 'Check-in sticker');
+  assert.equal(saved.author, '');
   assert.equal(saved.link.code, 'a');
   assert.equal(saved.link.url, 'https://dancewithb.fun/check-in');
   assert.deepEqual(saved.meta, { reliability: 0.97, minMm: 21 });
   assert.equal(saved.svg, undefined); // list/create responses stay small
 
-  r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'Plain text one', text: 'hello', svg: SVG }) });
-  const other = await r.json();
+  const other = await (await rpc('qr.create', { name: 'Plain text one', text: 'hello', svg: SVG })).json();
   assert.equal(other.link, null);
   assert.equal(other.details, '');
 
-  r = await call('/api/designs', { headers: auth });
-  const { designs } = await r.json();
-  assert.deepEqual(designs.map((d) => d.id), [other.id, saved.id]);
+  const { designs } = await (await rpc('qr.read')).json();
+  assert.deepEqual(designs.slice(0, 2).map((d) => d.id), [other.id, saved.id]);
   assert.ok(designs.every((d) => d.svg === undefined));
 
-  r = await call(`/api/designs/${saved.id}`, { headers: auth });
-  assert.equal((await r.json()).svg, SVG);
+  assert.equal((await (await rpc('qr.read', { id: saved.id })).json()).svg, SVG);
+  assert.equal((await (await call(`/api/qr.read?id=${saved.id}`, { headers: auth })).json()).svg, SVG); // GET works for reads
 
-  r = await call(`/api/designs/${saved.id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ name: 'Renamed', details: 'v2' }) });
-  const renamed = await r.json();
+  const renamed = await (await rpc('qr.update', { id: saved.id, name: 'Renamed', details: 'v2' })).json();
   assert.equal(renamed.name, 'Renamed');
   assert.equal(renamed.details, 'v2');
 
-  r = await call(`/api/designs/${other.id}`, { method: 'DELETE', headers: auth });
-  assert.equal(r.status, 200);
-  await r.arrayBuffer();
-  r = await call(`/api/designs/${other.id}`, { headers: auth });
-  assert.equal(r.status, 404);
-  await r.arrayBuffer();
+  await expectStatus(await rpc('qr.delete', { id: other.id }), 200);
+  await expectStatus(await rpc('qr.read', { id: other.id }), 404);
 });
 
-test('designs: require the token and validate input', async () => {
-  let r = await call('/api/designs', { method: 'POST', body: JSON.stringify({ name: 'x', text: 'x', svg: SVG }) });
-  assert.equal(r.status, 401);
-  await r.arrayBuffer();
+test('qr.create validates input', async () => {
+  await expectStatus(await rpc('qr.create', { name: 'x', text: 'x', svg: SVG }, {}), 401);
   const bad = [
     { text: 'x', svg: SVG },                                   // no name
     { name: 'x'.repeat(101), text: 'x', svg: SVG },
@@ -304,148 +293,122 @@ test('designs: require the token and validate input', async () => {
     { name: 'x', text: 'x', svg: SVG.replace('<rect ', '<a href="javascript:alert(1)"/><rect ') },
     { name: 'x', text: 'x', svg: SVG, meta: [1, 2] },
     { name: 'x', text: 'x', svg: SVG, details: 'd'.repeat(2001) },
+    { name: 'x', text: 'x', svg: SVG, author: 'a'.repeat(201) },
     { name: 'x', text: 'x', svg: SVG, image: 'data:image/svg+xml;base64,PHN2Zz4=' }, // logos are PNG only
     { name: 'x', text: 'x', svg: SVG, image: 'data:image/png;base64,<script>' },
     { name: 'x', text: 'x', svg: SVG, image: 'data:image/png;base64,' + 'A'.repeat(300_001) },
   ];
-  for (const body of bad) {
-    r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify(body) });
-    assert.equal(r.status, 400, JSON.stringify(body).slice(0, 80));
-    await r.arrayBuffer();
-  }
-  for (const id of ['0', 'abc', '-1', '1.5']) {
-    r = await call(`/api/designs/${id}`, { headers: auth });
-    assert.equal(r.status, 404, id);
-    await r.arrayBuffer();
-  }
+  for (const body of bad) await expectStatus(await rpc('qr.create', body), 400, JSON.stringify(body).slice(0, 80));
+  for (const id of ['0', 'abc', '-1', '1.5', 0, null]) await expectStatus(await rpc('qr.read', { id }), 404, String(id));
+  await expectStatus(await rpc('qr.read', { id: 1, format: 'png' }), 400);
 });
 
-test('designs: the editor can replace a saved code and keeps its logo', async () => {
-  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
-  let r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'Sticker', text: 'https://example.com/#a', svg: SVG, image: PNG, meta: { v: 1 } }) });
+test('qr.update replaces a saved code (from the editor) and keeps its logo', async () => {
+  let r = await rpc('qr.create', { name: 'Sticker', text: 'https://example.com/#a', svg: SVG, image: PNG, meta: { v: 1 } });
   assert.equal(r.status, 201);
   const { id } = await r.json();
-  r = await call(`/api/designs/${id}`, { headers: auth });
-  assert.equal((await r.json()).image, PNG);
+  assert.equal((await (await rpc('qr.read', { id })).json()).image, PNG);
 
   // text and svg must come together
-  r = await call(`/api/designs/${id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ text: 'https://example.com/#b' }) });
-  assert.equal(r.status, 400);
-  await r.arrayBuffer();
+  await expectStatus(await rpc('qr.update', { id, text: 'https://example.com/#b' }), 400);
 
   const SVG2 = SVG.replace('#000', '#e8365d');
   const text = `${w.base}/c/a#XyZ`;
-  r = await call(`/api/designs/${id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ name: 'Sticker v2', text, svg: SVG2, meta: { v: 2 } }) });
-  assert.equal(r.status, 200);
-  const replaced = await r.json();
+  const replaced = await (await rpc('qr.update', { id, name: 'Sticker v2', text, svg: SVG2, meta: { v: 2 } })).json();
   assert.equal(replaced.name, 'Sticker v2');
   assert.equal(replaced.text, text);
   assert.equal(replaced.link.code, 'a'); // now linked to the short link
   assert.deepEqual(replaced.meta, { v: 2 });
-  r = await call(`/api/designs/${id}`, { headers: auth });
-  const full = await r.json();
+  const full = await (await rpc('qr.read', { id })).json();
   assert.equal(full.svg, SVG2);
   assert.equal(full.image, PNG); // untouched when not sent
 
   // designs saved before logos were stored come back with image: null
-  r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'Old', text: 'x', svg: SVG }) });
-  r = await call(`/api/designs/${(await r.json()).id}`, { headers: auth });
-  assert.equal((await r.json()).image, null);
+  const old = await (await rpc('qr.create', { name: 'Old', text: 'x', svg: SVG })).json();
+  assert.equal((await (await rpc('qr.read', { id: old.id })).json()).image, null);
 });
 
-test('designs: realistic generated SVGs fit', async () => {
-  const big = SVG.replace('</svg>', '<g fill="#e8365d">' + '<circle cx="1.5" cy="1.5" r="0.45"/>'.repeat(20000) + '</g></svg>');
-  const r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'Big', text: 'x', svg: big }) });
-  assert.equal(r.status, 201, `size ${big.length}`);
-  await r.arrayBuffer();
-});
-
-// ---------------------------------------------------------------- embeds & the links-only key
-
-test('saved designs have an SVG link for API users that follows replacements', async () => {
-  const key = { Authorization: `Bearer ${API_TOKEN}` };
-  let r = await call('/api/designs', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'Embed me', text: 'x', svg: SVG }) });
-  const saved = await r.json();
-  const m = /\/d\/([0-9a-f]{20})\.svg$/.exec(saved.svg_url);
-  assert.ok(m, saved.svg_url);
-  const path = `/d/${m[1]}.svg`;
-
-  // only with a token: the API key or the admin token
-  for (const headers of [{}, { Authorization: 'Bearer nope' }]) {
-    r = await call(path, { headers });
-    assert.equal(r.status, 401);
-    await r.arrayBuffer();
-  }
-  r = await wBare.call(path);
-  assert.equal(r.status, 503); // no tokens configured at all: fails closed
-  await r.arrayBuffer();
-  r = await call(path, { headers: auth });
-  assert.equal(r.status, 200);
-  await r.arrayBuffer();
-  r = await call(path, { headers: key });
+test('qr.read with format "svg" returns the raw image', async () => {
+  const { id } = await (await rpc('qr.create', { name: 'Image', text: 'x', svg: SVG })).json();
+  let r = await rpc('qr.read', { id, format: 'svg' });
   assert.equal(r.status, 200);
   assert.match(r.headers.get('content-type'), /^image\/svg\+xml/);
   assert.equal(r.headers.get('access-control-allow-origin'), null); // server-to-server only
   assert.match(r.headers.get('cache-control'), /^private/);
   assert.match(r.headers.get('content-security-policy'), /default-src 'none'/);
   assert.equal(await r.text(), SVG);
+  r = await call(`/api/qr.read?id=${id}&format=svg`, { headers: auth });
+  assert.equal(await r.text(), SVG);
+  await expectStatus(await call(`/api/qr.read?id=${id}&format=svg`), 401); // never without a token
+});
 
-  const SVG2 = SVG.replace('#000', '#123456');
-  r = await call(`/api/designs/${saved.id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ text: 'y', svg: SVG2 }) });
-  await r.arrayBuffer();
-  r = await call(path, { headers: key });
-  assert.equal(await r.text(), SVG2);
-  r = await call(`/api/designs/${saved.id}`, { headers: auth });
-  assert.equal((await r.json()).svg_url, saved.svg_url); // the address never changes
-
-  // ids are random, not the row id; unknown or malformed ones are 404
-  for (const bad of [`/d/${'0'.repeat(20)}.svg`, `/d/${saved.id}.svg`, `/d/${m[1]}.png`, '/d/']) {
-    r = await call(bad, { headers: key });
-    assert.equal(r.status, 404, bad);
-    await r.arrayBuffer();
-  }
-  r = await call(`/api/designs/${saved.id}`, { method: 'DELETE', headers: auth });
-  await r.arrayBuffer();
-  r = await call(path, { headers: key });
-  assert.equal(r.status, 404);
+test('designs: realistic generated SVGs fit', async () => {
+  const big = SVG.replace('</svg>', '<g fill="#e8365d">' + '<circle cx="1.5" cy="1.5" r="0.45"/>'.repeat(20000) + '</g></svg>');
+  const r = await rpc('qr.create', { name: 'Big', text: 'x', svg: big });
+  assert.equal(r.status, 201, `size ${big.length}`);
   await r.arrayBuffer();
 });
 
-test('the API key can read links and change destinations, nothing else', async () => {
-  const lk = { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' };
-  let r = await call('/api/links', { method: 'POST', headers: auth, body: JSON.stringify({ url: 'https://dancewithb.fun/check-in?events=1' }) });
-  const link = await r.json();
+// ---------------------------------------------------------------- authors and the API key
 
-  r = await call('/api/links', { headers: lk });
-  assert.equal(r.status, 200);
-  assert.ok((await r.json()).links.some((l) => l.code === link.code));
-  r = await call(`/api/links/${link.code}`, { headers: lk });
-  assert.equal((await r.json()).url, 'https://dancewithb.fun/check-in?events=1');
-  r = await call(`/api/links/${link.code}`, { method: 'PATCH', headers: lk, body: JSON.stringify({ url: 'https://dancewithb.fun/check-in?events=2' }) });
+test('authors: the admin sets and filters by author', async () => {
+  const mine = await (await rpc('qr.create', { name: 'Mine', text: 'x', svg: SVG, author: 'alex@example.com' })).json();
+  assert.equal(mine.author, 'alex@example.com');
+  const theirs = await (await rpc('qr.create', { name: 'Theirs', text: 'x', svg: SVG, author: 'sam' })).json();
+  const { designs } = await (await rpc('qr.read', { author: 'alex@example.com' })).json();
+  assert.ok(designs.length >= 1 && designs.every((d) => d.author === 'alex@example.com'));
+  assert.ok(!designs.some((d) => d.id === theirs.id));
+  const moved = await (await rpc('qr.update', { id: theirs.id, new_author: 'alex@example.com' })).json();
+  assert.equal(moved.author, 'alex@example.com');
+});
+
+test('the API key: one author at a time for qr.*, no creating or moving designs', async () => {
+  const a = await (await rpc('qr.create', { name: 'Author A', text: 'x', svg: SVG, author: 'author-a' })).json();
+  const b = await (await rpc('qr.create', { name: 'Author B', text: 'x', svg: SVG, author: 'author-b' })).json();
+
+  // must name an author
+  for (const params of [{}, { author: '' }, { author: '  ' }, { id: a.id }]) await expectStatus(await rpc('qr.read', params, key), 400, JSON.stringify(params));
+
+  const { designs } = await (await rpc('qr.read', { author: 'author-a' }, key)).json();
+  assert.deepEqual(designs.map((d) => d.id), [a.id]);
+  assert.equal((await (await rpc('qr.read', { author: 'author-a', id: a.id }, key)).json()).svg, SVG);
+  const img = await rpc('qr.read', { author: 'author-a', id: a.id, format: 'svg' }, key);
+  assert.equal(await img.text(), SVG);
+
+  // another author's design looks like it doesn't exist
+  await expectStatus(await rpc('qr.read', { author: 'author-a', id: b.id }, key), 404);
+  await expectStatus(await rpc('qr.read', { author: 'author-a', id: b.id, format: 'svg' }, key), 404);
+  await expectStatus(await rpc('qr.update', { author: 'author-a', id: b.id, name: 'Hijacked' }, key), 404);
+  await expectStatus(await rpc('qr.delete', { author: 'author-a', id: b.id }, key), 404);
+  assert.equal((await (await rpc('qr.read', { id: b.id })).json()).name, 'Author B');
+
+  // its own author's designs: rename, replace, delete
+  const renamed = await (await rpc('qr.update', { author: 'author-a', id: a.id, name: 'A2', details: 'via API' }, key)).json();
+  assert.equal(renamed.name, 'A2');
+  const SVG2 = SVG.replace('#000', '#222');
+  await expectStatus(await rpc('qr.update', { author: 'author-a', id: a.id, text: 'y', svg: SVG2 }, key), 200);
+  await expectStatus(await rpc('qr.update', { author: 'author-a', id: a.id, new_author: 'author-b' }, key), 403);
+  await expectStatus(await rpc('qr.create', { name: 'x', text: 'x', svg: SVG, author: 'author-a' }, key), 403);
+  await expectStatus(await rpc('qr.delete', { author: 'author-a', id: a.id }, key), 200);
+  await expectStatus(await rpc('qr.read', { id: a.id }), 404);
+});
+
+test('the API key can read links and change destinations, nothing else', async () => {
+  const link = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in?events=1' })).json();
+
+  const { links } = await (await rpc('link.read', {}, key)).json();
+  assert.ok(links.some((l) => l.code === link.code));
+  assert.equal((await (await rpc('link.read', { code: link.code }, key)).json()).url, 'https://dancewithb.fun/check-in?events=1');
+  const r = await rpc('link.update', { code: link.code, url: 'https://dancewithb.fun/check-in?events=2' }, key);
   assert.equal(r.status, 200);
   assert.equal((await r.json()).url, 'https://dancewithb.fun/check-in?events=2');
-  r = await call(`/c/${link.code}`);
-  assert.equal(r.headers.get('location'), 'https://dancewithb.fun/check-in?events=2#');
-  await r.arrayBuffer();
+  const go = await call(`/c/${link.code}`);
+  assert.equal(go.headers.get('location'), 'https://dancewithb.fun/check-in?events=2#');
+  await go.arrayBuffer();
 
-  const forbidden = [
-    ['/api/links', { method: 'POST', body: JSON.stringify({ url: 'https://example.com/' }) }],
-    [`/api/links/${link.code}`, { method: 'DELETE' }],
-    ['/api/designs', {}],
-    ['/api/designs', { method: 'POST', body: JSON.stringify({ name: 'x', text: 'x', svg: SVG }) }],
-  ];
-  for (const [p, init] of forbidden) {
-    r = await call(p, { ...init, headers: lk });
-    assert.equal(r.status, 403, `${init.method || 'GET'} ${p}`);
-    await r.arrayBuffer();
-  }
-  r = await call('/api/links', { headers: { Authorization: 'Bearer api-key-457' } });
-  assert.equal(r.status, 401);
-  await r.arrayBuffer();
+  await expectStatus(await rpc('link.create', { url: 'https://example.com/' }, key), 403);
+  await expectStatus(await rpc('link.delete', { code: link.code }, key), 403);
+  await expectStatus(await rpc('link.read', {}, { Authorization: 'Bearer api-key-457' }), 401);
   // a worker without API_TOKEN doesn't accept it (or an empty bearer)
-  for (const t of [API_TOKEN, '']) {
-    r = await wBase.call('/api/links', { headers: { Authorization: `Bearer ${t}` } });
-    assert.equal(r.status, 401, JSON.stringify(t));
-    await r.arrayBuffer();
-  }
+  for (const t of [API_TOKEN, '']) await expectStatus(await rpc('link.read', {}, { Authorization: `Bearer ${t}` }, wBase), 401, JSON.stringify(t));
 });

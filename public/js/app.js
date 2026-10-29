@@ -28,11 +28,12 @@ const store = (area) => { try { return window[area]; } catch { return null; } };
 const getToken = () => store('sessionStorage')?.getItem('adminToken') || store('localStorage')?.getItem('adminToken') || '';
 const setToken = (t) => store('sessionStorage')?.setItem('adminToken', t);
 
-async function api(path, { method = 'GET', body } = {}) {
-  const res = await fetch(path, {
-    method,
-    headers: { Authorization: `Bearer ${getToken()}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
+/** Calls an API method, e.g. api('link.update', { code, url }) (see src/worker.js). */
+async function api(method, params = {}) {
+  const res = await fetch(`/api/${method}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(res.status === 401 ? 'Wrong or missing admin token.' : data.error || `Request failed (${res.status})`);
@@ -406,22 +407,22 @@ async function save(e) {
   const c = selected;
   try {
     msg.textContent = replace ? 'Replacing…' : 'Saving…';
-    const saved = await api(replace ? `/api/designs/${editing.id}` : '/api/designs', {
-      method: replace ? 'PATCH' : 'POST',
-      body: {
-        name: $('saveName').value,
-        details: $('saveDetails').value,
-        text: c.text,
-        svg: toSVG(c.rendered),
-        meta: {
-          set: c.set, grid: c.grid, size: c.size, ecl: c.ecl, strength: c.strength,
-          reliability: c.score.reliability, byDecoder: c.score.byDecoder, minMm: c.score.minMm,
-          match: c.match, printMm: lastPrint.mm, distanceMm: lastPrint.distanceMm, atPrint: c.score.atPrint,
-          style: { shape: c.style.shape, eyes: c.style.eyes, dotScale: c.style.dotScale, maxLum: c.style.maxLum },
-          link: c.link, settings: lastSettings,
-        },
-        image: lastLogo,
+    const author = $('saveAuthor').value.trim();
+    store('localStorage')?.setItem('qrAuthor', author);
+    const saved = await api(replace ? 'qr.update' : 'qr.create', {
+      ...(replace ? { id: editing.id, new_author: author } : { author }),
+      name: $('saveName').value,
+      details: $('saveDetails').value,
+      text: c.text,
+      svg: toSVG(c.rendered),
+      meta: {
+        set: c.set, grid: c.grid, size: c.size, ecl: c.ecl, strength: c.strength,
+        reliability: c.score.reliability, byDecoder: c.score.byDecoder, minMm: c.score.minMm,
+        match: c.match, printMm: lastPrint.mm, distanceMm: lastPrint.distanceMm, atPrint: c.score.atPrint,
+        style: { shape: c.style.shape, eyes: c.style.eyes, dotScale: c.style.dotScale, maxLum: c.style.maxLum },
+        link: c.link, settings: lastSettings,
       },
+      image: lastLogo,
     });
     msg.innerHTML = `${replace ? 'Replaced' : 'Saved'}. <a href="saved.html">See saved codes</a>`;
     if (replace) setEditing({ id: saved.id, name: saved.name });
@@ -443,7 +444,7 @@ async function shorten() {
     setToken(token.trim());
   }
   try {
-    const l = await api('/api/links', { method: 'POST', body: { url: link } });
+    const l = await api('link.create', { url: link });
     $('text').value = l.short;
     setNote(`Short link ${l.short} → ${l.url}. You can change its destination later on the Short links page.`);
     markStale();
@@ -501,7 +502,7 @@ async function loadForEdit(id) {
   }
   let d;
   try {
-    d = await api(`/api/designs/${encodeURIComponent(id)}`);
+    d = await api('qr.read', { id });
   } catch (err) {
     return setNote(`Could not open saved code ${id}: ${err.message}`);
   }
@@ -515,6 +516,7 @@ async function loadForEdit(id) {
   });
   $('saveName').value = d.name;
   $('saveDetails').value = d.details || '';
+  $('saveAuthor').value = d.author || '';
   setEditing({ id: d.id, name: d.name });
   if (d.image) {
     try { setSource(await loadImage(d.image), SQUARE_PX, SQUARE_PX, 'Logo saved with this code'); } catch { /* keep the default */ }
@@ -530,6 +532,7 @@ if (presetText) $('text').value = presetText;
 syncLabels();
 checkColors();
 setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'dancewithb.fun logo');
+$('saveAuthor').value = store('localStorage')?.getItem('qrAuthor') || '';
 if (params.get('edit')) loadForEdit(params.get('edit'));
 
 // The settings column scrolls on its own (desktop layout); size it to the

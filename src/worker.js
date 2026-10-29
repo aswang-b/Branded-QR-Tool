@@ -1,26 +1,32 @@
-// Short-link redirect Worker.
+// Short-link redirect Worker and API.
 //
-//   GET  /c/<code>            302 to the stored destination (public)
-//   GET  /d/<image id>.svg    a saved design's SVG                (admin, API key)
-//   POST /api/links           create   {url, label?}            (admin)
-//   GET  /api/links           list                               (admin, API key)
-//   GET  /api/links/<code>    one link                           (admin, API key)
-//   PATCH /api/links/<code>   update   {url?, label?}            (admin, API key)
-//   DELETE /api/links/<code>  delete                             (admin)
-//   POST /api/designs         save a generated QR design          (admin)
-//   GET  /api/designs         list saved designs (no SVG)          (admin)
-//   GET  /api/designs/<id>    one design, with its SVG and logo    (admin)
-//   PATCH /api/designs/<id>   rename, edit details, or replace the code (admin)
-//   DELETE /api/designs/<id>  delete                               (admin)
+//   GET /c/<code>   302 to the stored destination (public)
+//
+// The API is a set of named methods, <domain>.<create|read|update|delete>,
+// called as POST /api/<method> with a JSON body (read methods also accept
+// GET /api/<method>?<params>). Anything that isn't plain CRUD hangs off the
+// closest method: listing is a read without an id, the raw SVG is a read with
+// format "svg".
+//
+//   link.create  {url, label?}                                    admin
+//   link.read    {code} -> one link | {limit?, offset?} -> list    admin, API key
+//   link.update  {code, url?, label?}                             admin, API key
+//   link.delete  {code}                                           admin
+//   qr.create    {name, text, svg, details?, author?, meta?, image?}  admin
+//   qr.read      {id, format?: "json"|"svg"} -> one design (with svg and logo)
+//                {author?, limit?, offset?} -> list (no svg)       admin, API key*
+//   qr.update    {id, name?, details?, text + svg?, meta?, image?, new_author?}
+//                                                                 admin, API key*
+//   qr.delete    {id}                                             admin, API key*
+//   * the API key must pass {author} on every qr.* call and only ever sees that
+//     author's designs; it can't create designs or move them to another author.
 //
 // Everything else is served from the static assets (see wrangler.jsonc: the
-// Worker only runs for /c/*, /d/* and /api/*, so the site itself stays free of
+// Worker only runs for /c/* and /api/*, so the site itself stays free of
 // per-request Worker invocations).
 //
 // Auth: Authorization: Bearer <token>. ADMIN_TOKEN can do everything.
-// API_TOKEN (optional) is for other projects' servers: it can only read short
-// links, change their destination/label, and fetch saved designs' SVGs, so a
-// leak can't create, edit or delete designs or create/delete links.
+// API_TOKEN (optional) is for other projects' servers, limited as above.
 //
 // Codes are the row id written in bijective base 36 over a-z then 0-9:
 //   1 -> a, 26 -> z, 27 -> 0, 36 -> 9, 37 -> aa, 38 -> ab, ...
@@ -41,6 +47,7 @@ const MAX_DETAILS_LENGTH = 2000;
 const MAX_TEXT_LENGTH = 4296; // largest QR payload
 const MAX_META_LENGTH = 16 * 1024;
 const MAX_IMAGE_LENGTH = 300_000; // source logo, as a PNG data URL
+const MAX_AUTHOR_LENGTH = 200;
 
 // ---------------------------------------------------------------- codes
 
@@ -103,13 +110,6 @@ async function authorize(request, env) {
   if (m && admin) return 'admin';
   if (m && apiKey) return 'api';
   return json({ error: 'Unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
-}
-
-/** What the API key may do under /api: read links, and change a link's destination/label. */
-function apiKeyMay(request, url) {
-  const m = /^\/api\/links(?:\/([A-Za-z0-9]+))?\/?$/.exec(url.pathname);
-  if (!m) return false;
-  return request.method === 'GET' || (request.method === 'PATCH' && !!m[1]);
 }
 
 async function readJson(request, maxBytes = MAX_BODY_BYTES) {
@@ -229,12 +229,8 @@ function ensureSchema(db) {
     ])
     // Added later: tables created before them get the columns here.
     .then(() => addColumn(db, 'designs', 'image TEXT'))
-    .then(() => addColumn(db, 'designs', 'public_id TEXT'))
-    // Unguessable ids for public embeds; give older designs one too.
-    .then(() => db.batch([
-      db.prepare("UPDATE designs SET public_id = lower(hex(randomblob(10))) WHERE public_id IS NULL"),
-      db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS designs_public_id ON designs (public_id)'),
-    ]))
+    .then(() => addColumn(db, 'designs', "author TEXT NOT NULL DEFAULT ''"))
+    .then(() => db.prepare('CREATE INDEX IF NOT EXISTS designs_author ON designs (author, id)').run())
     .catch((e) => {
       schemaReady = null;
       throw e;
@@ -246,11 +242,6 @@ function addColumn(db, table, column) {
   return db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column}`).run().catch((e) => {
     if (!/duplicate column/i.test(String(e?.message ?? e))) throw e;
   });
-}
-
-/** 20 hex characters (80 random bits): the public id in /d/<id>.svg. */
-function newPublicId() {
-  return [...crypto.getRandomValues(new Uint8Array(10))].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function publicBase(request, env) {
@@ -277,9 +268,9 @@ function presentDesign(row, base, { withSvg = false } = {}) {
     id: row.id,
     name: row.name,
     details: row.details,
+    author: row.author ?? '',
     text: row.text,
     link: row.link_id ? { code: encodeId(row.link_id), short: `${base}/c/${encodeId(row.link_id)}`, url: row.link_url ?? null } : null,
-    svg_url: row.public_id ? `${base}/d/${row.public_id}.svg` : null,
     meta,
     created_at: row.created_at,
   };
@@ -315,149 +306,184 @@ async function redirect(request, env, ctx, rawCode) {
   });
 }
 
-async function designsApi(request, env, url, base, rawId) {
-  const db = env.DB;
-  const select = `SELECT d.id, d.name, d.details, d.text, d.link_id, d.meta, d.created_at, d.public_id, l.url AS link_url %SVG%
-                  FROM designs d LEFT JOIN links l ON l.id = d.link_id`;
-  if (rawId === undefined) {
-    if (request.method === 'POST') {
-      const body = await readJson(request, MAX_DESIGN_BODY_BYTES);
-      const name = parseText(body.name, 'name', MAX_NAME_LENGTH);
-      const details = parseText(body.details, 'details', MAX_DETAILS_LENGTH, { required: false });
-      const text = parseText(body.text, 'text', MAX_TEXT_LENGTH);
-      const svg = parseSvg(body.svg);
-      const meta = parseMeta(body.meta);
-      const image = parseImage(body.image);
-      const { id } = await db.prepare('INSERT INTO designs (name, details, text, link_id, svg, meta, image, public_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id')
-        .bind(name, details, text, linkIdFor(text, request, env), svg, meta, image, newPublicId(), Math.floor(Date.now() / 1000))
-        .first();
-      const row = await db.prepare(`${select.replace('%SVG%', '')} WHERE d.id = ?`).bind(id).first();
-      return json(presentDesign(row, base), 201);
-    }
-    if (request.method === 'GET') {
-      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 100));
-      const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
-      const { results } = await db.prepare(`${select.replace('%SVG%', '')} ORDER BY d.id DESC LIMIT ? OFFSET ?`).bind(limit, offset).all();
-      return json({ designs: results.map((r) => presentDesign(r, base)) });
-    }
-    return json({ error: 'Method not allowed' }, 405, { Allow: 'GET, POST' });
-  }
+// ---------------------------------------------------------------- API methods
 
-  const id = /^[1-9][0-9]{0,15}$/.test(rawId) ? Number(rawId) : null;
-  if (!id) return json({ error: 'Not found' }, 404);
-  if (request.method === 'GET') {
-    const row = await db.prepare(`${select.replace('%SVG%', ', d.svg, d.image')} WHERE d.id = ?`).bind(id).first();
-    return row ? json(presentDesign(row, base, { withSvg: true })) : json({ error: 'Not found' }, 404);
-  }
-  if (request.method === 'PATCH') {
-    const body = await readJson(request, MAX_DESIGN_BODY_BYTES);
-    const sets = [];
-    const args = [];
-    if (body.name !== undefined) { sets.push('name = ?'); args.push(parseText(body.name, 'name', MAX_NAME_LENGTH)); }
-    if (body.details !== undefined) { sets.push('details = ?'); args.push(parseText(body.details, 'details', MAX_DETAILS_LENGTH, { required: false })); }
-    // Replacing the code itself (from the editor) sends text and svg together.
-    if ((body.text === undefined) !== (body.svg === undefined)) throw new HttpError(400, 'Send "text" and "svg" together to replace the code');
-    if (body.text !== undefined) {
-      const text = parseText(body.text, 'text', MAX_TEXT_LENGTH);
-      sets.push('text = ?', 'link_id = ?', 'svg = ?');
-      args.push(text, linkIdFor(text, request, env), parseSvg(body.svg));
-    }
-    if (body.meta !== undefined) { sets.push('meta = ?'); args.push(parseMeta(body.meta)); }
-    if (body.image !== undefined) { sets.push('image = ?'); args.push(parseImage(body.image)); }
-    if (!sets.length) throw new HttpError(400, 'Nothing to update: send "name", "details", or "text" + "svg"');
-    const res = await db.prepare(`UPDATE designs SET ${sets.join(', ')} WHERE id = ?`).bind(...args, id).run();
-    if (!res.meta?.changes) return json({ error: 'Not found' }, 404);
-    const row = await db.prepare(`${select.replace('%SVG%', '')} WHERE d.id = ?`).bind(id).first();
-    return json(presentDesign(row, base));
-  }
-  if (request.method === 'DELETE') {
-    const res = await db.prepare('DELETE FROM designs WHERE id = ?').bind(id).run();
-    return res.meta?.changes ? json({ deleted: id }) : json({ error: 'Not found' }, 404);
-  }
-  return json({ error: 'Method not allowed' }, 405, { Allow: 'GET, PATCH, DELETE' });
+const DESIGN_COLUMNS = 'd.id, d.name, d.details, d.author, d.text, d.link_id, d.meta, d.created_at, l.url AS link_url';
+const LINK_COLUMNS = 'id, url, label, created_at, hits, last_hit';
+
+function parsePage(p) {
+  return {
+    limit: Math.min(200, Math.max(1, Number(p.limit) || 100)),
+    offset: Math.max(0, Number(p.offset) || 0),
+  };
+}
+
+function parseLinkCode(value) {
+  const id = typeof value === 'string' ? decodeCode(value.trim().toLowerCase()) : null;
+  if (id === null) throw new HttpError(404, 'Not found');
+  return id;
+}
+
+function parseDesignId(value) {
+  const v = typeof value === 'number' ? String(value) : value;
+  if (typeof v !== 'string' || !/^[1-9][0-9]{0,15}$/.test(v)) throw new HttpError(404, 'Not found');
+  return Number(v);
 }
 
 /**
- * A saved design's SVG at its stable image id, for other projects: their
- * server fetches it with the API key and shows it (an <img> tag can't send the
- * key). Replacing the design in the editor updates what this returns.
+ * The author a qr.* call is limited to: the API key must name one and then
+ * only sees that author's designs; the admin may optionally filter by one.
+ * @returns {string|null} null = all authors
  */
-async function embed(request, env, publicId) {
-  if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
-  const role = await authorize(request, env);
-  if (role instanceof Response) return role;
-  await ensureSchema(env.DB);
-  const row = await env.DB.prepare('SELECT svg FROM designs WHERE public_id = ?').bind(publicId).first();
-  if (!row) return new Response('Not found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
-  return new Response(request.method === 'HEAD' ? null : row.svg, {
-    headers: {
-      'Content-Type': 'image/svg+xml; charset=utf-8',
-      // Behind a key: only the caller may cache it (briefly, so replacements show).
-      'Cache-Control': 'private, max-age=300',
-      'X-Content-Type-Options': 'nosniff',
-      // Saved SVGs are validated on save; this is belt and braces if one is opened directly.
-      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-    },
-  });
+function authorScope(p, role) {
+  if (role === 'api') {
+    if (typeof p.author !== 'string' || !p.author.trim()) throw new HttpError(400, 'The API key must pass "author"');
+    return parseText(p.author, 'author', MAX_AUTHOR_LENGTH);
+  }
+  return p.author === undefined ? null : parseText(p.author, 'author', MAX_AUTHOR_LENGTH, { required: false });
 }
 
+const linkCreate = async ({ env, url, base, p }) => {
+  const row = await env.DB.prepare(`INSERT INTO links (url, label, created_at) VALUES (?, ?, ?) RETURNING ${LINK_COLUMNS}`)
+    .bind(parseDestination(p.url, url), parseLabel(p.label), Math.floor(Date.now() / 1000))
+    .first();
+  return json(present(row, base), 201);
+};
+
+const linkRead = async ({ env, base, p }) => {
+  if (p.code !== undefined) {
+    const row = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE id = ?`).bind(parseLinkCode(p.code)).first();
+    return row ? json(present(row, base)) : json({ error: 'Not found' }, 404);
+  }
+  const { limit, offset } = parsePage(p);
+  const { results } = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links ORDER BY id DESC LIMIT ? OFFSET ?`).bind(limit, offset).all();
+  return json({ links: results.map((r) => present(r, base)) });
+};
+
+const linkUpdate = async ({ env, url, base, p }) => {
+  const id = parseLinkCode(p.code);
+  const sets = [];
+  const args = [];
+  if (p.url !== undefined) { sets.push('url = ?'); args.push(parseDestination(p.url, url)); }
+  if (p.label !== undefined) { sets.push('label = ?'); args.push(parseLabel(p.label)); }
+  if (!sets.length) throw new HttpError(400, 'Nothing to update: send "url" and/or "label"');
+  const row = await env.DB.prepare(`UPDATE links SET ${sets.join(', ')} WHERE id = ? RETURNING ${LINK_COLUMNS}`).bind(...args, id).first();
+  return row ? json(present(row, base)) : json({ error: 'Not found' }, 404);
+};
+
+const linkDelete = async ({ env, p }) => {
+  const id = parseLinkCode(p.code);
+  const res = await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id).run();
+  return res.meta?.changes ? json({ deleted: encodeId(id) }) : json({ error: 'Not found' }, 404);
+};
+
+const fetchDesign = (db, id, author, extra = '') =>
+  db.prepare(`SELECT ${DESIGN_COLUMNS}${extra} FROM designs d LEFT JOIN links l ON l.id = d.link_id WHERE d.id = ?${author === null ? '' : ' AND d.author = ?'}`)
+    .bind(id, ...(author === null ? [] : [author]))
+    .first();
+
+const qrCreate = async ({ req, env, base, p }) => {
+  const text = parseText(p.text, 'text', MAX_TEXT_LENGTH);
+  const { id } = await env.DB.prepare('INSERT INTO designs (name, details, author, text, link_id, svg, meta, image, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id')
+    .bind(
+      parseText(p.name, 'name', MAX_NAME_LENGTH),
+      parseText(p.details, 'details', MAX_DETAILS_LENGTH, { required: false }),
+      parseText(p.author, 'author', MAX_AUTHOR_LENGTH, { required: false }),
+      text, linkIdFor(text, req, env), parseSvg(p.svg), parseMeta(p.meta), parseImage(p.image), Math.floor(Date.now() / 1000),
+    )
+    .first();
+  return json(presentDesign(await fetchDesign(env.DB, id, null), base), 201);
+};
+
+const qrRead = async ({ env, base, p, role }) => {
+  const author = authorScope(p, role);
+  if (p.id !== undefined) {
+    const format = p.format ?? 'json';
+    if (format !== 'json' && format !== 'svg') throw new HttpError(400, '"format" must be "json" or "svg"');
+    const row = await fetchDesign(env.DB, parseDesignId(p.id), author, ', d.svg, d.image');
+    if (!row) return json({ error: 'Not found' }, 404);
+    if (format === 'json') return json(presentDesign(row, base, { withSvg: true }));
+    // The raw image, for another project's server to inline or serve itself.
+    return new Response(row.svg, {
+      headers: {
+        'Content-Type': 'image/svg+xml; charset=utf-8',
+        'Cache-Control': 'private, max-age=300',
+        'X-Content-Type-Options': 'nosniff',
+        // Saved SVGs are validated on save; belt and braces if one is opened directly.
+        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+      },
+    });
+  }
+  const { limit, offset } = parsePage(p);
+  const where = author === null ? '' : ' WHERE d.author = ?';
+  const { results } = await env.DB.prepare(`SELECT ${DESIGN_COLUMNS} FROM designs d LEFT JOIN links l ON l.id = d.link_id${where} ORDER BY d.id DESC LIMIT ? OFFSET ?`)
+    .bind(...(author === null ? [] : [author]), limit, offset)
+    .all();
+  return json({ designs: results.map((r) => presentDesign(r, base)) });
+};
+
+const qrUpdate = async ({ req, env, base, p, role }) => {
+  const author = authorScope(p, role);
+  const id = parseDesignId(p.id);
+  const sets = [];
+  const args = [];
+  if (p.name !== undefined) { sets.push('name = ?'); args.push(parseText(p.name, 'name', MAX_NAME_LENGTH)); }
+  if (p.details !== undefined) { sets.push('details = ?'); args.push(parseText(p.details, 'details', MAX_DETAILS_LENGTH, { required: false })); }
+  if (p.new_author !== undefined) {
+    // Moving a design to another author would take it out of the key's reach.
+    if (role === 'api') throw new HttpError(403, 'The API key cannot change a design\'s author');
+    sets.push('author = ?'); args.push(parseText(p.new_author, 'new_author', MAX_AUTHOR_LENGTH, { required: false }));
+  }
+  // Replacing the code itself (from the editor) sends text and svg together.
+  if ((p.text === undefined) !== (p.svg === undefined)) throw new HttpError(400, 'Send "text" and "svg" together to replace the code');
+  if (p.text !== undefined) {
+    const text = parseText(p.text, 'text', MAX_TEXT_LENGTH);
+    sets.push('text = ?', 'link_id = ?', 'svg = ?');
+    args.push(text, linkIdFor(text, req, env), parseSvg(p.svg));
+  }
+  if (p.meta !== undefined) { sets.push('meta = ?'); args.push(parseMeta(p.meta)); }
+  if (p.image !== undefined) { sets.push('image = ?'); args.push(parseImage(p.image)); }
+  if (!sets.length) throw new HttpError(400, 'Nothing to update: send "name", "details", "new_author", "meta", "image", or "text" + "svg"');
+  const scope = author === null ? ['', []] : [' AND author = ?', [author]];
+  const res = await env.DB.prepare(`UPDATE designs SET ${sets.join(', ')} WHERE id = ?${scope[0]}`).bind(...args, id, ...scope[1]).run();
+  if (!res.meta?.changes) return json({ error: 'Not found' }, 404);
+  return json(presentDesign(await fetchDesign(env.DB, id, null), base));
+};
+
+const qrDelete = async ({ env, p, role }) => {
+  const author = authorScope(p, role);
+  const id = parseDesignId(p.id);
+  const scope = author === null ? ['', []] : [' AND author = ?', [author]];
+  const res = await env.DB.prepare(`DELETE FROM designs WHERE id = ?${scope[0]}`).bind(id, ...scope[1]).run();
+  return res.meta?.changes ? json({ deleted: id }) : json({ error: 'Not found' }, 404);
+};
+
+/** read: callable with GET; big: accepts design-sized bodies. */
+const METHODS = {
+  'link.create': { roles: ['admin'], run: linkCreate },
+  'link.read': { roles: ['admin', 'api'], read: true, run: linkRead },
+  'link.update': { roles: ['admin', 'api'], run: linkUpdate },
+  'link.delete': { roles: ['admin'], run: linkDelete },
+  'qr.create': { roles: ['admin'], big: true, run: qrCreate },
+  'qr.read': { roles: ['admin', 'api'], read: true, run: qrRead },
+  'qr.update': { roles: ['admin', 'api'], big: true, run: qrUpdate },
+  'qr.delete': { roles: ['admin', 'api'], run: qrDelete },
+};
+
 async function api(request, env, url) {
+  const name = /^\/api\/([a-z]+\.[a-z]+)\/?$/.exec(url.pathname)?.[1];
+  const method = name && Object.hasOwn(METHODS, name) ? METHODS[name] : null;
+  if (!method) return json({ error: `Unknown method. Use one of: ${Object.keys(METHODS).join(', ')}` }, 404);
+  const verbs = method.read ? 'GET, POST' : 'POST';
+  if (request.method !== 'POST' && !(method.read && request.method === 'GET')) return json({ error: `${name} takes ${verbs}` }, 405, { Allow: verbs });
   const role = await authorize(request, env);
   if (role instanceof Response) return role;
-  if (role === 'api' && !apiKeyMay(request, url)) return json({ error: 'The API key can only read links, change their destination, and fetch saved codes\' images' }, 403);
+  if (!method.roles.includes(role)) return json({ error: `The API key cannot call ${name}` }, 403);
+  const p = request.method === 'GET'
+    ? Object.fromEntries(url.searchParams)
+    : await readJson(request, method.big ? MAX_DESIGN_BODY_BYTES : MAX_BODY_BYTES);
   await ensureSchema(env.DB);
-  const base = publicBase(request, env);
-  const d = /^\/api\/designs(?:\/([^/]+))?\/?$/.exec(url.pathname);
-  if (d) return designsApi(request, env, url, base, d[1]);
-  const m = /^\/api\/links(?:\/([A-Za-z0-9]+))?\/?$/.exec(url.pathname);
-  if (!m) return json({ error: 'Not found' }, 404);
-  const code = m[1];
-
-  if (!code) {
-    if (request.method === 'POST') {
-      const body = await readJson(request);
-      const dest = parseDestination(body.url, url);
-      const label = parseLabel(body.label);
-      const row = await env.DB.prepare('INSERT INTO links (url, label, created_at) VALUES (?, ?, ?) RETURNING id, url, label, created_at, hits, last_hit')
-        .bind(dest, label, Math.floor(Date.now() / 1000))
-        .first();
-      return json(present(row, base), 201);
-    }
-    if (request.method === 'GET') {
-      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 100));
-      const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
-      const { results } = await env.DB.prepare('SELECT id, url, label, created_at, hits, last_hit FROM links ORDER BY id DESC LIMIT ? OFFSET ?')
-        .bind(limit, offset)
-        .all();
-      return json({ links: results.map((r) => present(r, base)) });
-    }
-    return json({ error: 'Method not allowed' }, 405, { Allow: 'GET, POST' });
-  }
-
-  const id = decodeCode(code.toLowerCase());
-  if (id === null) return json({ error: 'Not found' }, 404);
-
-  if (request.method === 'GET') {
-    const row = await env.DB.prepare('SELECT id, url, label, created_at, hits, last_hit FROM links WHERE id = ?').bind(id).first();
-    return row ? json(present(row, base)) : json({ error: 'Not found' }, 404);
-  }
-  if (request.method === 'PATCH') {
-    const body = await readJson(request);
-    const sets = [];
-    const args = [];
-    if (body.url !== undefined) { sets.push('url = ?'); args.push(parseDestination(body.url, url)); }
-    if (body.label !== undefined) { sets.push('label = ?'); args.push(parseLabel(body.label)); }
-    if (!sets.length) throw new HttpError(400, 'Nothing to update: send "url" and/or "label"');
-    const row = await env.DB.prepare(`UPDATE links SET ${sets.join(', ')} WHERE id = ? RETURNING id, url, label, created_at, hits, last_hit`)
-      .bind(...args, id)
-      .first();
-    return row ? json(present(row, base)) : json({ error: 'Not found' }, 404);
-  }
-  if (request.method === 'DELETE') {
-    const res = await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id).run();
-    return res.meta?.changes ? json({ deleted: encodeId(id) }) : json({ error: 'Not found' }, 404);
-  }
-  return json({ error: 'Method not allowed' }, 405, { Allow: 'GET, PATCH, DELETE' });
+  return method.run({ req: request, env, url, base: publicBase(request, env), p, role });
 }
 
 export default {
@@ -467,9 +493,6 @@ export default {
       const short = /^\/c\/([A-Za-z0-9]+)\/?$/.exec(url.pathname);
       if (short) return await redirect(request, env, ctx, short[1]);
       if (url.pathname.startsWith('/c/') || url.pathname === '/c') return notFound();
-      const d = /^\/d\/([0-9a-f]{20})\.svg$/.exec(url.pathname);
-      if (d) return await embed(request, env, d[1]);
-      if (url.pathname.startsWith('/d/')) return notFound();
       if (url.pathname.startsWith('/api/')) return await api(request, env, url);
       return env.ASSETS ? env.ASSETS.fetch(request) : notFound();
     } catch (e) {

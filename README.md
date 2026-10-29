@@ -121,41 +121,61 @@ Source layout (`public/` is the whole site):
 | `vendor/jsQR.js` | [jsQR](https://github.com/cozmo/jsQR) (Apache-2.0) |
 | `vendor/zxing/` | [zxing-wasm](https://github.com/Sec-ant/zxing-wasm) reader (MIT, ZXing-C++ Apache-2.0) |
 
-## Using codes from other projects
+## API
 
-Generating a code (planning, rendering, scan-scoring) takes seconds of CPU, far more than a free
-Worker request allows, so other projects don't generate codes through an API. Instead:
+The API is a small set of named methods, `<domain>.<create|read|update|delete>`, called as
+`POST /api/<method>` with a JSON body. Read methods also accept `GET /api/<method>?<params>`. Anything
+that isn't plain CRUD sits under the closest method: listing is a `read` without an id, and the raw
+image is a `read` with `"format": "svg"`. Every call needs `Authorization: Bearer <token>`.
 
-1. **Fetch a saved code's image.** Every saved code has a stable image link,
-   `https://qr.dancewithb.fun/d/<20 hex characters>.svg` (on *Saved codes*: **Copy image link**). It
-   only answers with a token, so the other project's **server** fetches it and then inlines the SVG
-   or serves it from its own pages (a plain `<img>` tag can't send a token):
+| Method | Params | Returns | Who |
+|---|---|---|---|
+| `link.create` | `url`, `label?` | the link (201) | admin |
+| `link.read` | `code` | one link | admin, API key |
+| `link.read` | `limit?`, `offset?` | `{links: […]}`, newest first | admin, API key |
+| `link.update` | `code`, `url?`, `label?` | the link | admin, API key |
+| `link.delete` | `code` | `{deleted}` | admin |
+| `qr.create` | `name`, `text`, `svg`, `details?`, `author?`, `meta?`, `image?` | the code (201) | admin |
+| `qr.read` | `id`, `format?` | one code with `svg` and `image`; with `"format": "svg"` the raw `image/svg+xml` | admin, API key* |
+| `qr.read` | `author?`, `limit?`, `offset?` | `{designs: […]}` (no SVGs), newest first | admin, API key* |
+| `qr.update` | `id`, `name?`, `details?`, `text` + `svg`?, `meta?`, `image?`, `new_author?` | the code | admin, API key* |
+| `qr.delete` | `id` | `{deleted}` | admin, API key* |
 
-   ```
-   GET https://qr.dancewithb.fun/d/<id>.svg
-   Authorization: Bearer <API_TOKEN>
-   ```
+\* **The API key and authors.** Every `qr.*` call with the API key must pass `author`, and then only
+sees that author's codes: another author's code answers 404. The key can't create codes (they are
+made in the generator) or move one to another author (`new_author`). For the admin, `author` is an
+optional filter. Authors are free text, e.g. an email address or a project name, set in the
+generator's save form and shown on *Saved codes*.
 
-   Replacing the code in the editor changes what the link returns; the address never changes.
-   Responses may be cached for up to 5 minutes (`Cache-Control: private, max-age=300`). Deleting
-   the saved code makes the link 404.
-2. **Change what a code opens, from another project's server.** Point the printed or embedded code
-   at a short link, then update the short link's destination when it should change, e.g. when a new
-   class's check-in link is generated:
-
-   ```
-   PATCH https://qr.dancewithb.fun/api/links/<code>
-   Authorization: Bearer <API_TOKEN>
-   Content-Type: application/json
-
-   {"url": "https://dancewithb.fun/check-in?events=…"}
-   ```
+Errors are `{"error": "…"}` with status 400 (bad params), 401 (missing or wrong token), 403 (the API
+key can't call that), 404 (unknown method, or nothing with that id/code), 405 (wrong HTTP verb), or
+503 (`ADMIN_TOKEN` not configured: the API fails closed). `image` is the source logo as a PNG data URL
+(at most 300 kB), kept so the editor can regenerate the code. SVGs containing scripts, event handlers
+or links are rejected, and only `http(s)` destinations are accepted.
 
 **The API key.** `API_TOKEN` is a separate secret (`npx wrangler secret put API_TOKEN`) for other
-projects. It can only list and read links (`GET /api/links`, `GET /api/links/<code>`), change a
-link's `url`/`label` (`PATCH`), and fetch saved codes' images (`GET /d/<id>.svg`). It can't
-create or delete links or create, change or delete saved codes, so keep the admin token out of other
-projects. Store it in the other project's server-side secrets, never in browser code.
+projects' servers, limited as in the table. Keep the admin token out of other projects, and keep the
+API key in server-side secrets, never in browser code.
+
+### Using codes from other projects
+
+Generating a code (planning, rendering, scan-scoring) takes seconds of CPU, far more than a free
+Worker request allows, so codes are made in the generator and other projects use them through the API:
+
+- **Show an author's codes:** `qr.read {author}` lists them; `qr.read {author, id, format: "svg"}`
+  returns one as an SVG for the other project's server to inline or serve from its own pages (a
+  plain `<img>` tag can't send the token). Responses may be cached for up to 5 minutes.
+- **Edit them:** `qr.update {author, id, name, details}` renames; `qr.delete {author, id}` deletes.
+- **Change what a printed code opens:** point the code at a short link and update the link when the
+  destination should change, e.g. when a new class's check-in link is generated:
+
+  ```
+  POST https://qr.dancewithb.fun/api/link.update
+  Authorization: Bearer <API_TOKEN>
+  Content-Type: application/json
+
+  {"code": "a", "url": "https://dancewithb.fun/check-in?events=…"}
+  ```
 
 ## Short links (redirect Worker)
 
@@ -167,14 +187,7 @@ Worker redirects (HTTP 302) to wherever that code currently points.
   A character is added after `9`, and again after `99`. Codes are never reused, even after a delete.
 - **Managing links:** open `/links.html`, enter the admin token, create links, change a destination
   later, delete, and see scan counts. "QR" opens the maker with the short URL filled in.
-- **API** (all need `Authorization: Bearer <ADMIN_TOKEN>`):
-  `POST /api/links {url, label?}`, `GET /api/links`, `PATCH /api/links/<code> {url?, label?}`,
-  `DELETE /api/links/<code>`; saved designs: `POST /api/designs {name, details?, text, svg, meta?, image?}`,
-  `GET /api/designs`, `GET|PATCH|DELETE /api/designs/<id>` (`PATCH` renames, edits details, or
-  replaces the code with `text` + `svg`, plus `meta`/`image`). `image` is the source logo as a
-  PNG data URL (at most 300 kB), kept so the editor can regenerate the code. Saved SVGs containing scripts, event
-  handlers or links are rejected. Only `http(s)` destinations are accepted, so the endpoint can't be
-  used for `javascript:` links. Without `ADMIN_TOKEN` set, the API refuses everything.
+- **API:** `link.create`, `link.read`, `link.update`, `link.delete` (see *API*).
 - **Storage** is one D1 table, created automatically on first use. Each scan costs one read and one
   write; the free plan allows on the order of 100k writes/day (check Cloudflare's current limits).
 

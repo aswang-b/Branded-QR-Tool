@@ -10,11 +10,12 @@ function setMsg(text, kind = '') {
   $('msg').className = 'status ' + kind;
 }
 
-async function api(path, { method = 'GET', body } = {}) {
-  const res = await fetch(path, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
+/** Calls an API method, e.g. api('link.update', { code, url }) (see src/worker.js). */
+async function api(method, params = {}) {
+  const res = await fetch(`/api/${method}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(res.status === 401 ? 'Wrong admin token.' : data.error || `Request failed (${res.status})`);
@@ -71,11 +72,11 @@ function render(links) {
       button('Edit', async () => {
         const next = prompt(`Where should /c/${l.code} go?`, l.url);
         if (next === null || next.trim() === l.url) return;
-        try { await api(`/api/links/${l.code}`, { method: 'PATCH', body: { url: next } }); await load(); } catch (e) { setMsg(e.message, 'bad'); }
+        try { await api('link.update', { code: l.code, url: next }); await load(); } catch (e) { setMsg(e.message, 'bad'); }
       }),
       button('Delete', async () => {
         if (!confirm(`Delete /c/${l.code}? Printed codes will stop working and the code is never reused.`)) return;
-        try { await api(`/api/links/${l.code}`, { method: 'DELETE' }); await load(); } catch (e) { setMsg(e.message, 'bad'); }
+        try { await api('link.delete', { code: l.code }); await load(); } catch (e) { setMsg(e.message, 'bad'); }
       }),
     );
     tr.append(code, dest, cell(String(l.hits), 'num'), cell(new Date(l.created_at * 1000).toLocaleDateString()), actions);
@@ -89,7 +90,7 @@ async function load() {
   if (!token) return setMsg('Enter your admin token to manage links.', 'warn');
   try {
     setMsg('Loading…');
-    render((await api('/api/links?limit=200')).links);
+    render((await api('link.read', { limit: 200 })).links);
   } catch (e) {
     $('table').hidden = true;
     setMsg(e.message, 'bad');
@@ -113,7 +114,7 @@ $('create').addEventListener('click', async () => {
   box.hidden = true;
   if (!token) return setMsg('Enter your admin token first.', 'warn');
   try {
-    const l = await api('/api/links', { method: 'POST', body: { url: $('dest').value, label: $('label').value || undefined } });
+    const l = await api('link.create', { url: $('dest').value, label: $('label').value || undefined });
     box.hidden = false;
     box.replaceChildren();
     const strong = document.createElement('strong');
