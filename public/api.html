@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>API</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e8365d'/%3E%3Cpath d='M7 7h7v7H7zM18 7h7v7h-7zM7 18h7v7H7zM18 18h3v3h-3zM22 22h3v3h-3z' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="top">
+    <nav class="nav"><a href="index.html">Make</a><a href="links.html">Short links</a><a href="saved.html">Saved codes</a><a href="api.html" aria-current="page">API</a></nav>
+    <h1>API</h1>
+    <p>What other projects can do with short links and saved codes, and what each method accepts.</p>
+  </header>
+  <main class="stack">
+    <section class="panel" aria-label="Sign in">
+      <div class="field">
+        <label for="token">Admin token</label>
+        <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
+        <label class="check"><input id="remember" type="checkbox"> Remember on this device</label>
+      </div>
+    </section>
+    <p id="msg" class="status" role="status" aria-live="polite"></p>
+    <div id="spec" class="stack-inner" hidden></div>
+  </main>
+  <script type="module" src="js/api.js"></script>
+</body>
+</html>

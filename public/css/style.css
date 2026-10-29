@@ -188,3 +188,14 @@ input[type="number"], input[type="password"] {
   repeating-conic-gradient(var(--line) 0% 25%, transparent 0% 50%) 50% / 12px 12px; }
 .saved-info h2 { margin: 0 0 4px; }
 .saved-details { margin: 0 0 10px; white-space: pre-wrap; }
+
+/* API page */
+.stack-inner { display: grid; gap: 16px; }
+.api-method h2 code { font-size: 1rem; }
+.api-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.badge { font-size: .72rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); }
+.badge.role-api { border-color: color-mix(in srgb, var(--accent) 50%, transparent); color: var(--accent); }
+.api-list { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.api-toc { line-height: 1.9; }
+.code-block { margin: 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  font-size: .8rem; overflow-x: auto; white-space: pre; }

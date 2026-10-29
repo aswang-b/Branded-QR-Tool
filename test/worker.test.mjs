@@ -412,3 +412,22 @@ test('the API key can read links and change destinations, nothing else', async (
   // a worker without API_TOKEN doesn't accept it (or an empty bearer)
   for (const t of [API_TOKEN, '']) await expectStatus(await rpc('link.read', {}, { Authorization: `Bearer ${t}` }, wBase), 401, JSON.stringify(t));
 });
+
+test('spec.read: the API specification, admin only, covering every method', async () => {
+  await expectStatus(await rpc('spec.read', {}, {}), 401);
+  await expectStatus(await rpc('spec.read', {}, key), 403);
+  const spec = await (await call('/api/spec.read', { headers: auth })).json(); // GET works too
+  const names = spec.methods.map((m) => m.name);
+  assert.deepEqual(names, ['link.create', 'link.read', 'link.update', 'link.delete', 'qr.create', 'qr.read', 'qr.update', 'qr.delete', 'spec.read']);
+  for (const m of spec.methods) {
+    assert.ok(m.summary && m.returns && Array.isArray(m.params), `${m.name} is documented`);
+    assert.ok(m.params.every((p) => p.name && p.type && p.desc), `${m.name} params are documented`);
+  }
+  // who may call what comes from the enforced method table
+  const roles = Object.fromEntries(spec.methods.map((m) => [m.name, m.roles.join(',')]));
+  assert.equal(roles['link.create'], 'admin');
+  assert.equal(roles['qr.update'], 'admin,api');
+  assert.deepEqual(spec.methods.find((m) => m.name === 'qr.read').verbs, ['GET', 'POST']);
+  assert.deepEqual(spec.methods.find((m) => m.name === 'qr.delete').verbs, ['POST']);
+  assert.ok(spec.errors.some((e) => e.status === 403));
+});

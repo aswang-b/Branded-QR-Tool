@@ -20,6 +20,7 @@
 //   qr.delete    {id}                                             admin, API key*
 //   * the API key must pass {author} on every qr.* call and only ever sees that
 //     author's designs; it can't create designs or move them to another author.
+//   spec.read    {} -> this API's specification (see spec.js)       admin
 //
 // Everything else is served from the static assets (see wrangler.jsonc: the
 // Worker only runs for /c/* and /api/*, so the site itself stays free of
@@ -33,6 +34,8 @@
 // so a character is added after "9" (-> "aa") and again after "99" (-> "aaa").
 // Ids come from an AUTOINCREMENT column, which D1 assigns atomically, and
 // they are never reused after a delete.
+
+import { buildSpec } from './spec.js';
 
 const ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const BASE = ALPHABET.length;
@@ -468,6 +471,7 @@ const METHODS = {
   'qr.read': { roles: ['admin', 'api'], read: true, run: qrRead },
   'qr.update': { roles: ['admin', 'api'], big: true, run: qrUpdate },
   'qr.delete': { roles: ['admin', 'api'], run: qrDelete },
+  'spec.read': { roles: ['admin'], read: true, run: ({ base }) => json(buildSpec(METHODS, base)) },
 };
 
 async function api(request, env, url) {
