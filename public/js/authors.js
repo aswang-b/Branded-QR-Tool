@@ -111,18 +111,8 @@ Give them to ${name}'s new token?`)) throw e;
   }
 });
 
-// This browser's admin token: shown from local storage (the server never sends it).
-$('showAdmin').addEventListener('click', () => {
-  const show = $('token').type === 'password';
-  $('token').type = show ? 'text' : 'password';
-  $('showAdmin').textContent = show ? 'Hide' : 'Show';
-});
-$('copyAdmin').addEventListener('click', () => {
-  if (!$('token').value) return setMsg('No admin token is saved in this browser.', 'warn');
-  copy($('token').value, 'Admin token copied.');
-});
 
 $('refresh').addEventListener('click', () => load());
 
-bindSignIn(() => load());
+bindSignIn(() => load(), { showToken: true });
 load();

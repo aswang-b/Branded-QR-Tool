@@ -22,12 +22,10 @@
         <div class="row nowrap">
           <input id="token" name="password" type="password" autocomplete="current-password" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
           <button type="submit" class="small">Sign in</button>
-          <button type="button" class="small" id="showAdmin">Show</button>
-          <button type="button" class="small" id="copyAdmin">Copy</button>
         </div>
         <label class="check"><input id="remember" type="checkbox"> Remember on this device</label>
-        <p class="hint">This is the token you sign in with. It is a Cloudflare secret the server never sends out, so this shows the copy saved in this browser. Lost it? Set a new one with <code>npx wrangler secret put ADMIN_TOKEN</code>.</p>
       </form>
+      <p class="hint">Once signed in, Show token / Copy token display the admin token you signed in with. It is a Cloudflare secret the server never sends out, so this is the copy saved in this browser. Lost it? Set a new one with <code>npx wrangler secret put ADMIN_TOKEN</code>.</p>
     </section>
 
     <section class="panel" aria-label="Add an author">

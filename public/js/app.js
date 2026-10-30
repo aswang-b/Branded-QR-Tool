@@ -530,10 +530,12 @@ function loadAuthorSuggestions() {
 }
 loadAuthorSuggestions();
 bindSignIn(() => {
+  if (!getToken()) return;
+  $('token').value = '';
   $('signin').hidden = true;
   $('saveMsg').textContent = 'Signed in. Press Save.';
   loadAuthorSuggestions();
-});
+}, { bar: false });
 if (params.get('edit')) loadForEdit(params.get('edit'));
 
 // The settings column scrolls on its own (desktop layout); size it to the

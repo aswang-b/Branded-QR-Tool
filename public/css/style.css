@@ -43,6 +43,8 @@ body {
 .muted { color: var(--muted); font-weight: 400; }
 /* present for password managers and screen readers' structure, not shown */
 .save-title { margin: 16px 0 8px; }
+.signed-in { color: var(--muted); font-size: .9rem; }
+.signed-in .token { overflow-wrap: anywhere; }
 .signin-inline { margin: 0 0 10px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .hint { margin: 4px 0 0; color: var(--muted); font-size: .8rem; }
