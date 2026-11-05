@@ -123,8 +123,10 @@ Source layout (`public/` is the whole site):
 
 ## API
 
-The full specification (params, returns, examples, errors) is on the **API** tab, behind the admin
-token. It comes from `spec.read`, built from the same method table the Worker enforces.
+The full specification (params, returns, examples, errors) is on the **API** tab. Sign in there with
+`admin` and the admin token to see everything, or with an **author name and their token** to see the
+guide to what that token can call (the token must belong to that name). It comes from `spec.read`,
+built from the same method table the Worker enforces.
 
 The API is a small set of named methods, `<domain>.<create|read|update|delete>`, called as
 `POST /api/<method>` with a JSON body. Read methods also accept `GET /api/<method>?<params>`. Anything

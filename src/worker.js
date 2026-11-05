@@ -27,7 +27,8 @@
 //                 {include_tokens?} -> list                         admin
 //   author.update {name, new_name?, rotate_token?, adopt_existing?} admin
 //   author.delete {name}                                          admin
-//   spec.read    {} -> this API's specification (see spec.js)       admin
+//   spec.read    {} -> this API's specification (see spec.js); authors
+//                get the part their token can use                  admin, author
 //
 // Everything else is served from the static assets (see wrangler.jsonc: the
 // Worker only runs for /c/* and /api/*, so the site itself stays free of
@@ -678,7 +679,7 @@ const METHODS = {
   'author.read': { roles: ['admin'], read: true, run: authorRead },
   'author.update': { roles: ['admin'], run: authorUpdate },
   'author.delete': { roles: ['admin'], run: authorDelete },
-  'spec.read': { roles: ['admin'], read: true, run: ({ base }) => json(buildSpec(METHODS, base)) },
+  'spec.read': { roles: ['admin', 'author'], read: true, run: ({ base, who }) => json(buildSpec(METHODS, base, who)) },
 };
 
 async function api(request, env, url, ctx) {

@@ -190,17 +190,22 @@ export const ROLE_DOCS = {
 };
 
 /**
- * The full specification, given the Worker's method table.
+ * The specification, given the Worker's method table, as seen by the caller:
+ * the admin gets everything; an author gets the methods their token can call.
  * @param {Record<string, {roles: string[], read?: boolean}>} methods
+ * @param {{role: 'admin'} | {role: 'author', author: string}} who
  */
-export function buildSpec(methods, base) {
+export function buildSpec(methods, base, who = { role: 'admin' }) {
+  const admin = who.role === 'admin';
+  const visible = Object.entries(methods).filter(([, m]) => admin || m.roles.includes(who.role));
   return {
+    viewer: admin ? { role: 'admin' } : { role: who.role, author: who.author },
     base: `${base}/api/<method>`,
     transport: 'POST /api/<method> with a JSON object body. Methods marked "read" also accept GET /api/<method>?<params> (values arrive as strings).',
     auth: 'Authorization: Bearer <token> on every call.',
-    roles: ROLE_DOCS,
-    objects: { link: LINK, design: DESIGN, author: AUTHOR },
-    methods: Object.entries(methods).map(([name, m]) => ({
+    roles: admin ? ROLE_DOCS : { [who.role]: ROLE_DOCS[who.role] },
+    objects: admin ? { link: LINK, design: DESIGN, author: AUTHOR } : { link: LINK, design: DESIGN },
+    methods: visible.map(([name, m]) => ({
       name,
       verbs: m.read ? ['GET', 'POST'] : ['POST'],
       roles: m.roles,

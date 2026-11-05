@@ -2,7 +2,7 @@
 // itself stays behind the token) and renders it. Everything is built with
 // textContent; nothing from the response is parsed as HTML.
 
-import { api, getToken, bindSignIn } from './auth.js';
+import { api, getToken, getName, clearToken, bindSignIn } from './auth.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -59,6 +59,7 @@ function exampleCall(spec, m, role) {
 function overview(spec) {
   const list = el('dl', 'metrics');
   const add = (k, ...v) => { const dd = el('dd'); dd.append(...v); list.append(el('dt', null, k), dd); };
+  add('Signed in as', spec.viewer.role === 'admin' ? 'admin (the whole API)' : `${spec.viewer.author} (author token)`);
   add('Endpoint', code(spec.base));
   add('Calling', spec.transport);
   add('Auth', spec.auth);
@@ -79,11 +80,15 @@ function authorActions(spec) {
     ul.append(li);
   }
   const no = el('p', 'hint');
-  const a = el('a', null, 'Authors');
-  a.href = 'authors.html';
-  no.append('Admin only: ', ...cannot.flatMap((m, i) => [i ? ', ' : '', code(m.name)]),
-    '. An author token also cannot move a code to another author (new_author). Create and view author tokens on ', a, '.');
-  return section('What an author token can do', ul, no);
+  if (spec.viewer.role === 'admin') {
+    const a = el('a', null, 'Authors');
+    a.href = 'authors.html';
+    no.append('Admin only: ', ...cannot.flatMap((m, i) => [i ? ', ' : '', code(m.name)]),
+      '. An author token also cannot move a code to another author (new_author). Create and view author tokens on ', a, '.');
+  } else {
+    no.append('Everything your token creates belongs to you, and it only ever sees your own links and codes. It cannot delete links or move anything to another author.');
+  }
+  return section(spec.viewer.role === 'admin' ? 'What an author token can do' : 'What your token can do', ul, no);
 }
 
 function objects(spec) {
@@ -142,10 +147,18 @@ function render(spec) {
 
 async function load() {
   $('spec').hidden = true;
-  if (!getToken()) return setMsg('Enter your admin token to see the API specification.', 'warn');
+  if (!getToken()) return setMsg('Sign in with your author name and token (or "admin" and the admin token) to see the API guide.', 'warn');
   try {
     setMsg('Loading…');
-    render(await api('spec.read'));
+    const spec = await api('spec.read');
+    // The token decides who you are; the name must match it.
+    const actual = spec.viewer.role === 'admin' ? 'admin' : spec.viewer.author;
+    const claimed = getName();
+    if (claimed !== actual) {
+      clearToken();
+      throw new Error(`That token doesn't belong to "${claimed}". Check the author name and token.`);
+    }
+    render(spec);
     setMsg('');
   } catch (e) {
     setMsg(e.message, 'bad');

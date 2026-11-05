@@ -12,15 +12,16 @@
   <header class="top">
     <nav class="nav"><a href="index.html">Make</a><a href="links.html">Short links</a><a href="saved.html">Saved codes</a><a href="authors.html">Authors</a><a href="api.html" aria-current="page">API</a></nav>
     <h1>API</h1>
-    <p>What other projects can do with short links and saved codes, and what each method accepts.</p>
+    <p>What other projects can do with short links and saved codes, and what each method accepts. Authors sign in with their author name and token.</p>
   </header>
   <main class="stack">
     <section class="panel" aria-label="Sign in">
       <form class="field" id="signin" method="post" action="#">
-        <label for="token">Admin token</label>
-        <input type="text" name="username" value="admin" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">
+        <label for="who">Author name <span class="muted">(or "admin")</span></label>
+        <input id="who" name="username" type="text" autocomplete="username" spellcheck="false" maxlength="200" placeholder="your author name, e.g. alex@example.com">
+        <label for="token">Token <span class="muted">(your author token, or the admin token)</span></label>
         <div class="row nowrap">
-          <input id="token" name="password" type="password" autocomplete="current-password" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
+          <input id="token" name="password" type="password" autocomplete="current-password" spellcheck="false" placeholder="qra_… (or the admin token)">
           <button type="submit" class="small">Sign in</button>
         </div>
         <label class="check"><input id="remember" type="checkbox"> Remember on this device</label>

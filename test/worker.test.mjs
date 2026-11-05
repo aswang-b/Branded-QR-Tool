@@ -453,7 +453,7 @@ test('an author token only reaches its own codes, and cannot create or move them
   assert.equal(made.author, 'author-a'); // always its own
   await expectStatus(await rpc('qr.create', { name: 'x', text: 'x', svg: SVG, author: 'author-a' }, keyA), 201);
   await expectStatus(await rpc('qr.create', { name: 'x', text: 'x', svg: SVG, author: 'author-b' }, keyA), 403);
-  for (const m of ['author.create', 'author.read', 'author.update', 'author.delete', 'spec.read']) {
+  for (const m of ['author.create', 'author.read', 'author.update', 'author.delete']) {
     await expectStatus(await rpc(m, { name: 'author-a' }, keyA), 403, m);
   }
   await expectStatus(await rpc('qr.delete', { id: a.id }, keyA), 200);
@@ -582,4 +582,21 @@ test('every SVG the generator writes passes the save-time allowlist', () => {
           assert.doesNotThrow(() => parseSvg(svg), `v${version} ${shape}/${eyes}/${JSON.stringify(style)}`);
         }
   }
+});
+
+test('spec.read for an author: the guide to what their token can call', async () => {
+  const k = await authorKey('guide-reader');
+  const spec = await (await rpc('spec.read', {}, k)).json();
+  assert.deepEqual(spec.viewer, { role: 'author', author: 'guide-reader' });
+  assert.deepEqual(spec.methods.map((m) => m.name),
+    ['link.create', 'link.read', 'link.update', 'qr.create', 'qr.read', 'qr.update', 'qr.delete', 'spec.read']);
+  assert.ok(spec.methods.every((m) => m.roles.includes('author') && m.summary && m.params));
+  assert.deepEqual(Object.keys(spec.roles), ['author']);
+  assert.deepEqual(Object.keys(spec.objects), ['link', 'design']); // nothing about managing authors
+  assert.equal(JSON.stringify(spec).includes('qra_'), true); // describes the token format...
+  assert.ok(!JSON.stringify(spec).includes(k.Authorization.slice(7))); // ...but never contains a token
+  const admin = await (await rpc('spec.read')).json();
+  assert.deepEqual(admin.viewer, { role: 'admin' });
+  assert.equal(admin.methods.length, 13);
+  await expectStatus(await rpc('spec.read', {}, { Authorization: 'Bearer qra_nope' }), 401);
 });
