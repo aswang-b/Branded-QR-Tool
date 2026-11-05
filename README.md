@@ -133,12 +133,12 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 
 | Method | Params | Returns | Who |
 |---|---|---|---|
-| `link.create` | `url`, `label?`, `author?` | the link (201) | admin |
+| `link.create` | `url`, `label?`, `author?` | the link (201) | admin, author* |
 | `link.read` | `code` | one link | admin, author* |
 | `link.read` | `author?`, `limit?`, `offset?` | `{links: […]}`, newest first | admin, author* |
 | `link.update` | `code`, `url?`, `label?`, `new_author?` | the link | admin, author* |
 | `link.delete` | `code` | `{deleted}` | admin |
-| `qr.create` | `name`, `text`, `svg`, `details?`, `author?`, `meta?`, `image?` | the code (201) | admin |
+| `qr.create` | `name`, `text`, `svg`, `details?`, `author?`, `meta?`, `image?` | the code (201) | admin, author* |
 | `qr.read` | `id`, `format?` | one code with `svg` and `image`; with `"format": "svg"` the raw `image/svg+xml` | admin, author* |
 | `qr.read` | `author?`, `limit?`, `offset?` | `{designs: […]}` (no SVGs), newest first | admin, author* |
 | `qr.update` | `id`, `name?`, `details?`, `text` + `svg`?, `meta?`, `image?`, `new_author?` | the code | admin, author* |
@@ -153,8 +153,8 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 **Tokens.** `ADMIN_TOKEN` is a Wrangler secret and can do everything. **Author tokens** (`qra_…`) are
 for other projects' servers: authorize an author on the **Authors** tab (or `author.create`) and they
 get their own token. \* An author token only ever reaches its own author's codes and short links
-(another author's answer 404, and naming another author is refused); it can't create codes or links,
-move one to another author (`new_author`), or manage authors. Give a link to an author on the
+(another author's answer 404, and naming another author is refused). What it creates is always its
+own. It can't delete links, move anything to another author (`new_author`), or manage authors. Give a link to an author on the
 *Short links* page (Author field, or the Author button). Creating or renaming an author onto a name
 that codes or links already carry (e.g. left by a revoked author) is refused with 409 unless you pass
 `adopt_existing: true` (the Authors page asks first). For the admin, `author` is
@@ -181,9 +181,12 @@ code.
 ### Using codes from other projects
 
 Generating a code (planning, rendering, scan-scoring) takes seconds of CPU, far more than a free
-Worker request allows, so codes are made in the generator and other projects use them through the API
-with their author token:
+Worker request allows, so branded designs are made in the generator (`qr.create` only stores an SVG
+that was already generated). Other projects use them through the API with their author token:
 
+- **Create a short link:** `link.create {url, label}` makes one owned by the token's author (e.g. the
+  check-in link a printed code will open). Make the branded design for it once in the generator,
+  with the same Author.
 - **Show the author's codes:** `qr.read {}` lists them; `qr.read {id, format: "svg"}` returns one as
   an SVG for the other project's server to inline or serve from its own pages (a plain `<img>` tag
   can't send the token). Responses may be cached for up to 5 minutes.

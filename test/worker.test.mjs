@@ -449,7 +449,10 @@ test('an author token only reaches its own codes, and cannot create or move them
   assert.equal((await (await rpc('qr.update', { id: a.id, name: 'A2', details: 'via API' }, keyA)).json()).name, 'A2');
   await expectStatus(await rpc('qr.update', { id: a.id, text: 'y', svg: SVG.replace('#000', '#222') }, keyA), 200);
   await expectStatus(await rpc('qr.update', { id: a.id, new_author: 'author-b' }, keyA), 403);
-  await expectStatus(await rpc('qr.create', { name: 'x', text: 'x', svg: SVG, author: 'author-a' }, keyA), 403);
+  const made = await (await rpc('qr.create', { name: 'Made by A', text: 'x', svg: SVG }, keyA)).json();
+  assert.equal(made.author, 'author-a'); // always its own
+  await expectStatus(await rpc('qr.create', { name: 'x', text: 'x', svg: SVG, author: 'author-a' }, keyA), 201);
+  await expectStatus(await rpc('qr.create', { name: 'x', text: 'x', svg: SVG, author: 'author-b' }, keyA), 403);
   for (const m of ['author.create', 'author.read', 'author.update', 'author.delete', 'spec.read']) {
     await expectStatus(await rpc(m, { name: 'author-a' }, keyA), 403, m);
   }
@@ -457,7 +460,7 @@ test('an author token only reaches its own codes, and cannot create or move them
   await expectStatus(await rpc('qr.read', { id: a.id }), 404);
 });
 
-test('an author token reads and repoints only its own links, nothing else', async () => {
+test('an author token creates, reads and repoints only its own links', async () => {
   const k = await authorKey('link-user');
   const link = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in?events=1', author: 'link-user' })).json();
   assert.equal(link.author, 'link-user');
@@ -479,7 +482,12 @@ test('an author token reads and repoints only its own links, nothing else', asyn
   assert.equal(go.headers.get('location'), 'https://dancewithb.fun/check-in?events=2#');
   await go.arrayBuffer();
 
-  await expectStatus(await rpc('link.create', { url: 'https://example.com/' }, k), 403);
+  // what it creates is its own, and shows up in its list
+  const created = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in?events=3', label: 'Check-in' }, k)).json();
+  assert.equal(created.author, 'link-user');
+  assert.ok((await (await rpc('link.read', {}, k)).json()).links.some((l) => l.code === created.code));
+  await expectStatus(await rpc('link.create', { url: 'https://example.com/', author: 'someone' }, k), 403);
+  await expectStatus(await rpc('link.create', { url: `${w.base}/c/a` }, k), 400); // same rules as for the admin
   await expectStatus(await rpc('link.delete', { code: link.code }, k), 403);
   for (const t of ['qra_' + 'A'.repeat(43), 'qra_', 'api-key-457']) await expectStatus(await rpc('link.read', {}, { Authorization: `Bearer ${t}` }), 401, t);
   // tokens belong to one worker's database
@@ -498,7 +506,8 @@ test('spec.read: the API specification, admin only, covering every method', asyn
   }
   // who may call what comes from the enforced method table
   const roles = Object.fromEntries(spec.methods.map((m) => [m.name, m.roles.join(',')]));
-  assert.equal(roles['link.create'], 'admin');
+  assert.equal(roles['link.create'], 'admin,author');
+  assert.equal(roles['link.delete'], 'admin');
   assert.equal(roles['qr.update'], 'admin,author');
   assert.equal(roles['author.read'], 'admin');
   assert.deepEqual(spec.methods.find((m) => m.name === 'qr.read').verbs, ['GET', 'POST']);

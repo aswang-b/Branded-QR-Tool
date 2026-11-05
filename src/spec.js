@@ -48,7 +48,7 @@ export const METHOD_DOCS = {
     params: [
       param('url', 'string', true, 'Destination: an absolute http(s) URL, up to 2048 characters. Must not point at another short link.'),
       param('label', 'string', false, 'A note for yourself, up to 100 characters.'),
-      param('author', 'string', false, 'Whose link this is, up to 200 characters. That author\'s token can then read and repoint it.'),
+      param('author', 'string', false, 'Admin: whose link this is, up to 200 characters; that author\'s token can then read and repoint it. Author token: not needed, the link is always its own (another author is refused with 403).'),
     ],
     returns: 'The link (status 201).',
     example: { url: 'https://dancewithb.fun/check-in', label: 'Class check-in' },
@@ -84,13 +84,13 @@ export const METHOD_DOCS = {
     example: { code: 'a' },
   },
   'qr.create': {
-    summary: 'Save a QR code design (the generator does this when you press Save).',
+    summary: 'Save a QR code design (the generator does this when you press Save). Only stores an SVG that was already generated: branded designs are made in the generator, in the browser.',
     params: [
       param('name', 'string', true, '1–100 characters.'),
       param('text', 'string', true, 'What the code encodes, up to 4296 characters.'),
       param('svg', 'string', true, 'A single <svg> document as the generator writes it, up to 1.5 MB: only svg/g/rect/circle/path elements with plain shape and colour attributes; anything else is rejected.'),
       param('details', 'string', false, 'Up to 2000 characters.'),
-      param('author', 'string', false, 'Whose code this is, up to 200 characters (e.g. an email or project name).'),
+      param('author', 'string', false, 'Admin: whose code this is, up to 200 characters (e.g. an email or project name). Author token: not needed, the code is always its own (another author is refused with 403).'),
       param('meta', 'object', false, 'Scores and generator settings, up to 16 KB as JSON.'),
       param('image', 'string', false, 'Source logo as a PNG data URL (data:image/png;base64,…), up to 300 kB, so the code can be regenerated.'),
     ],
@@ -186,7 +186,7 @@ export const ERRORS = [
 
 export const ROLE_DOCS = {
   admin: 'ADMIN_TOKEN (a Wrangler secret): everything, including the site\'s pages and managing authors.',
-  author: 'Author token ("qra_…", made with author.create): for other projects\' servers. Reads and repoints its own author\'s short links; lists, fetches, edits and deletes its own author\'s saved codes. Cannot create links or codes, delete links, move anything between authors, reach other authors\' links or codes, or manage authors.',
+  author: 'Author token ("qra_…", made with author.create): for other projects\' servers. Creates, reads and repoints its own author\'s short links; creates, lists, fetches, edits and deletes its own author\'s saved codes. Cannot delete links, move anything between authors, reach other authors\' links or codes, or manage authors.',
 };
 
 /**

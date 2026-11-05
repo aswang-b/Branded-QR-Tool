@@ -8,19 +8,20 @@
 // closest method: listing is a read without an id, the raw SVG is a read with
 // format "svg".
 //
-//   link.create  {url, label?, author?}                           admin
+//   link.create  {url, label?, author?}                           admin, author*
 //   link.read    {code} -> one link | {author?, limit?, offset?} -> list
 //                                                                 admin, author*
 //   link.update  {code, url?, label?, new_author?}                admin, author*
 //   link.delete  {code}                                           admin
-//   qr.create    {name, text, svg, details?, author?, meta?, image?}  admin
+//   qr.create    {name, text, svg, details?, author?, meta?, image?}  admin, author*
 //   qr.read      {id, format?: "json"|"svg"} -> one design (with svg and logo)
 //                {author?, limit?, offset?} -> list (no svg)       admin, author*
 //   qr.update    {id, name?, details?, text + svg?, meta?, image?, new_author?}
 //                                                                 admin, author*
 //   qr.delete    {id}                                             admin, author*
-//   * an author token only ever sees its own author's links and designs; it
-//     can't create them or move them to another author.
+//   * an author token only ever sees its own author's links and designs, and
+//     what it creates is always its own; it can't move anything to another
+//     author or delete links.
 //   author.create {name, adopt_existing?} -> the author with a new token  admin
 //   author.read   {name} -> one author with token |
 //                 {include_tokens?} -> list                         admin
@@ -532,11 +533,15 @@ const authorDelete = async ({ env, p }) => {
 /** SQL to limit a query to one author (or nothing, for all). */
 const authorWhere = (author, column = 'author') => (author === null ? ['', []] : [` AND ${column} = ?`, [author]]);
 
-const linkCreate = async ({ req, env, base, p }) => {
+/** The author a new link or design gets: an author token's own; the admin's choice (or none). */
+const ownerFor = (p, who) =>
+  who.role === 'author' ? authorScope(p, who) : parseText(p.author, 'author', MAX_AUTHOR_LENGTH, { required: false });
+
+const linkCreate = async ({ req, env, base, p, who }) => {
   const row = await env.DB.prepare(`INSERT INTO links (url, label, author, created_at) VALUES (?, ?, ?, ?) RETURNING ${LINK_COLUMNS}`)
     .bind(
       parseDestination(p.url, shortLinkHosts(req, env)), parseLabel(p.label),
-      parseText(p.author, 'author', MAX_AUTHOR_LENGTH, { required: false }), Math.floor(Date.now() / 1000),
+      ownerFor(p, who), Math.floor(Date.now() / 1000),
     )
     .first();
   return json(present(row, base), 201);
@@ -583,13 +588,13 @@ const fetchDesign = (db, id, author, extra = '') =>
     .bind(id, ...(author === null ? [] : [author]))
     .first();
 
-const qrCreate = async ({ req, env, base, p }) => {
+const qrCreate = async ({ req, env, base, p, who }) => {
   const text = parseText(p.text, 'text', MAX_TEXT_LENGTH);
   const { id } = await env.DB.prepare('INSERT INTO designs (name, details, author, text, link_id, svg, meta, image, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id')
     .bind(
       parseText(p.name, 'name', MAX_NAME_LENGTH),
       parseText(p.details, 'details', MAX_DETAILS_LENGTH, { required: false }),
-      parseText(p.author, 'author', MAX_AUTHOR_LENGTH, { required: false }),
+      ownerFor(p, who),
       text, linkIdFor(text, req, env), parseSvg(p.svg), parseMeta(p.meta), parseImage(p.image), Math.floor(Date.now() / 1000),
     )
     .first();
@@ -661,11 +666,11 @@ const qrDelete = async ({ env, p, who }) => {
 
 /** read: callable with GET; big: accepts design-sized bodies. */
 const METHODS = {
-  'link.create': { roles: ['admin'], run: linkCreate },
+  'link.create': { roles: ['admin', 'author'], run: linkCreate },
   'link.read': { roles: ['admin', 'author'], read: true, run: linkRead },
   'link.update': { roles: ['admin', 'author'], run: linkUpdate },
   'link.delete': { roles: ['admin'], run: linkDelete },
-  'qr.create': { roles: ['admin'], big: true, run: qrCreate },
+  'qr.create': { roles: ['admin', 'author'], big: true, run: qrCreate },
   'qr.read': { roles: ['admin', 'author'], read: true, run: qrRead },
   'qr.update': { roles: ['admin', 'author'], big: true, run: qrUpdate },
   'qr.delete': { roles: ['admin', 'author'], run: qrDelete },
