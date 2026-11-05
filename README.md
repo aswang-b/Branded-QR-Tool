@@ -135,14 +135,14 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 
 | Method | Params | Returns | Who |
 |---|---|---|---|
-| `link.create` | `url`, `label?`, `author?` | the link (201) | admin, author* |
-| `link.read` | `code` | one link | admin, author* |
+| `link.create` | `url`, `label?`, `author?`, `key?` | the link (201; 200 if `key` already existed) | admin, author* |
+| `link.read` | `code` or `key`, `stats?`, `tz?`, `days?` | one link (with scans per day if `stats`) | admin, author* |
 | `link.read` | `author?`, `limit?`, `offset?` | `{links: […]}`, newest first | admin, author* |
-| `link.update` | `code`, `url?`, `label?`, `new_author?` | the link | admin, author* |
+| `link.update` | `code`, `url?`, `label?`, `new_author?`, `if_url?` | the link (409 if `if_url` no longer matches) | admin, author* |
 | `link.delete` | `code` | `{deleted}` | admin |
 | `qr.create` | `name`, `text`, `svg`, `details?`, `author?`, `meta?`, `image?` | the code (201) | admin, author* |
 | `qr.read` | `id`, `format?` | one code with `svg` and `image`; with `"format": "svg"` the raw `image/svg+xml` | admin, author* |
-| `qr.read` | `author?`, `limit?`, `offset?` | `{designs: […]}` (no SVGs), newest first | admin, author* |
+| `qr.read` | `author?`, `link?`, `limit?`, `offset?` | `{designs: […]}` (no SVGs), newest first | admin, author* |
 | `qr.update` | `id`, `name?`, `details?`, `text` + `svg`?, `meta?`, `image?`, `new_author?` | the code | admin, author* |
 | `qr.delete` | `id` | `{deleted}` | admin, author* |
 | `author.create` | `name`, `adopt_existing?` | the author with their token (201) | admin |
@@ -150,7 +150,7 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 | `author.read` | `include_tokens?` | `{authors: […]}` (tokens only when asked) | admin |
 | `author.update` | `name`, `new_name?`, `rotate_token?`, `adopt_existing?` | the author | admin |
 | `author.delete` | `name` | `{deleted}` | admin |
-| `spec.read` | | the specification | admin |
+| `spec.read` | | the specification (for an author: what their token can call) | admin, author |
 
 **Tokens.** `ADMIN_TOKEN` is a Wrangler secret and can do everything. **Author tokens** (`qra_…`) are
 for other projects' servers: authorize an author on the **Authors** tab (or `author.create`) and they
@@ -172,7 +172,8 @@ when you signed in (the server never sends the secret). Lost it? Set a new one w
 
 Errors are `{"error": "…"}` with status 400 (bad params), 401 (missing, wrong or revoked token), 403
 (the token can't do that), 404 (unknown method, or nothing with that id/code/name), 405 (wrong HTTP
-verb), 409 (author name taken, or already on codes/links without `adopt_existing`), or 503
+verb), 409 (`link.update` with an `if_url` that no longer matches; author name taken, or already on
+codes/links without `adopt_existing`), or 503
 (`ADMIN_TOKEN` not configured: the API fails closed). `image` is the source logo as a PNG data URL (at
 most 300 kB), kept so the editor can regenerate the code. SVGs must match what the generator writes
 (only `svg`, `g`, `rect`, `circle` and `path` with plain shape and colour attributes); anything else is
@@ -186,12 +187,20 @@ Generating a code (planning, rendering, scan-scoring) takes seconds of CPU, far 
 Worker request allows, so branded designs are made in the generator (`qr.create` only stores an SVG
 that was already generated). Other projects use them through the API with their author token:
 
-- **Create a short link:** `link.create {url, label}` makes one owned by the token's author (e.g. the
-  check-in link a printed code will open). Make the branded design for it once in the generator,
-  with the same Author.
-- **Show the author's codes:** `qr.read {}` lists them; `qr.read {id, format: "svg"}` returns one as
-  an SVG for the other project's server to inline or serve from its own pages (a plain `<img>` tag
-  can't send the token). Responses may be cached for up to 5 minutes.
+- **Create a short link:** `link.create {url, label, key}` makes one owned by the token's author (e.g. the
+  check-in link a printed code will open). With a `key`, a retried create returns the same link
+  instead of a second one, and `link.read {key}` finds it later.
+- **Make its branded design:** send the admin to
+  `https://qr.dancewithb.fun/?text=<short link>&author=<author>&name=<name>&return=<https url>`. The
+  generator fills those in, and after Save sends the browser back to `return` with `?qr_id=<id>`
+  added (https only, or a localhost dev server).
+- **Show the author's codes:** `qr.read {}` lists them, `qr.read {link: "c"}` just those for one
+  short link. Every code has a `svg_url` (`/q/<id>.svg?sig=…`), a signed image link an `<img>` can
+  load with no token: unguessable, and revoked by rotating the author's token (or the admin token).
+  `qr.read {id, format: "svg"}` returns the SVG itself for a server to inline.
+- **Count scans:** `link.read {code, stats: true, tz: "America/New_York", days: 7}` adds
+  `stats.days: [{date, hits}]`. Days are counted from when this was added; `hits` has the all-time
+  total.
 - **Edit them:** `qr.update {id, name, details}` renames; `qr.delete {id}` deletes.
 - **Change what a printed code opens:** point the code at a short link and update the link when the
   destination should change, e.g. when a new class's check-in link is generated:
@@ -201,8 +210,11 @@ that was already generated). Other projects use them through the API with their 
   Authorization: Bearer <author token>
   Content-Type: application/json
 
-  {"code": "a", "url": "https://dancewithb.fun/check-in?events=…"}
+  {"code": "a", "url": "https://dancewithb.fun/check-in?events=…", "if_url": "https://dancewithb.fun/check-in"}
   ```
+
+  `if_url` is optional: the update only happens if the link still points there, otherwise 409 with
+  the link as it is now (`updated_at` says when it last changed).
 
 ## Short links (redirect Worker)
 
@@ -215,12 +227,13 @@ Worker redirects (HTTP 302) to wherever that code currently points.
 - **Managing links:** open `/links.html`, enter the admin token, create links, change a destination
   later, delete, and see scan counts. "QR" opens the maker with the short URL filled in.
 - **API:** `link.create`, `link.read`, `link.update`, `link.delete` (see *API*).
-- **Storage** is one D1 table, created automatically on first use. Each scan costs one read and one
-  write; the free plan allows on the order of 100k writes/day (check Cloudflare's current limits).
+- **Storage** is D1, created automatically on first use. Each scan costs one read and one batched
+  write (the total, plus an hourly counter for per-day stats), sent after the redirect; the free plan
+  allows on the order of 100k writes/day (check Cloudflare's current limits).
 
 ## Deploy to Cloudflare (free)
 
-`wrangler.jsonc` runs the Worker only for `/c/*` and `/api/*`; everything else is served from
+`wrangler.jsonc` runs the Worker only for `/c/*`, `/q/*` and `/api/*`; everything else is served from
 static assets without invoking the Worker.
 
 ```sh

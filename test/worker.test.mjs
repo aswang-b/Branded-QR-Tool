@@ -600,3 +600,103 @@ test('spec.read for an author: the guide to what their token can call', async ()
   assert.equal(admin.methods.length, 13);
   await expectStatus(await rpc('spec.read', {}, { Authorization: 'Bearer qra_nope' }), 401);
 });
+
+// ---------------------------------------------------------------- integration helpers for other projects
+
+test('link.create with a key is idempotent, and link.read finds it by key', async () => {
+  const k = await authorKey('key-user');
+  const body = { url: 'https://dancewithb.fun/check-in', label: 'Check-in', key: 'dancewithb-checkin' };
+  const first = await rpc('link.create', body, k);
+  assert.equal(first.status, 201);
+  const made = await first.json();
+  assert.equal(made.key, 'dancewithb-checkin');
+  // a retry (even with another url) returns the same link, unchanged
+  const again = await rpc('link.create', { ...body, url: 'https://example.com/other' }, k);
+  assert.equal(again.status, 200);
+  const same = await again.json();
+  assert.equal(same.code, made.code);
+  assert.equal(same.url, 'https://dancewithb.fun/check-in');
+  // simultaneous creates still make one link
+  const racers = await Promise.all([1, 2, 3].map(() => rpc('link.create', { ...body, key: 'race' }, k)));
+  const codes = new Set(await Promise.all(racers.map((r) => r.json().then((j) => j.code))));
+  assert.equal(codes.size, 1);
+  // keys are per author: the admin's (no author) key is a different link
+  const adminOne = await (await rpc('link.create', body)).json();
+  assert.notEqual(adminOne.code, made.code);
+  assert.equal((await (await rpc('link.read', { key: 'dancewithb-checkin' }, k)).json()).code, made.code);
+  assert.equal((await (await rpc('link.read', { key: 'dancewithb-checkin' })).json()).code, adminOne.code);
+  assert.equal((await (await rpc('link.read', { key: 'dancewithb-checkin', author: 'key-user' })).json()).code, made.code);
+  await expectStatus(await rpc('link.read', { key: 'missing' }, k), 404);
+  await expectStatus(await rpc('link.read', { key: 'missing', code: 'a' }, k), 400);
+  for (const key of ['', 'has space', 'x'.repeat(101), 7]) await expectStatus(await rpc('link.create', { ...body, key }, k), 400, String(key));
+});
+
+test('link.update: updated_at, and if_url refuses to overwrite a link someone else moved', async () => {
+  const link = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in' })).json();
+  assert.equal(link.updated_at, link.created_at);
+  const ok = await rpc('link.update', { code: link.code, url: 'https://dancewithb.fun/check-in?events=1', if_url: 'https://dancewithb.fun/check-in' });
+  assert.equal(ok.status, 200);
+  assert.ok((await ok.json()).updated_at >= link.created_at);
+  // a second admin still thinks it points at the old url
+  const stale = await rpc('link.update', { code: link.code, url: 'https://dancewithb.fun/check-in?events=2', if_url: 'https://dancewithb.fun/check-in' });
+  assert.equal(stale.status, 409);
+  const body = await stale.json();
+  assert.equal(body.link.url, 'https://dancewithb.fun/check-in?events=1');
+  assert.equal((await (await rpc('link.read', { code: link.code })).json()).url, 'https://dancewithb.fun/check-in?events=1');
+  await expectStatus(await rpc('link.update', { code: 'zzzz', url: 'https://x.example/', if_url: 'https://x.example/' }), 404);
+  await expectStatus(await rpc('link.update', { code: link.code, label: 'x', if_url: 3 }), 400);
+});
+
+test('link.read stats: scans per day in a time zone', async () => {
+  const link = await (await rpc('link.create', { url: 'https://example.com/stats' })).json();
+  for (let i = 0; i < 3; i++) await (await call(`/c/${link.code}`)).arrayBuffer();
+  await new Promise((r) => setTimeout(r, 300));
+  const r = await (await rpc('link.read', { code: link.code, stats: true, tz: 'America/New_York', days: 7 })).json();
+  assert.equal(r.hits, 3);
+  assert.equal(r.stats.tz, 'America/New_York');
+  assert.equal(r.stats.days.length, 7);
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+  assert.deepEqual(r.stats.days.at(-1), { date: today, hits: 3 });
+  assert.equal(r.stats.days.reduce((s, d) => s + d.hits, 0), 3);
+  assert.ok(r.stats.days.every((d, i, a) => !i || a[i - 1].date < d.date));
+  // over GET too, default UTC and 30 days
+  const g = await (await call(`/api/link.read?code=${link.code}&stats=true`, { headers: auth })).json();
+  assert.equal(g.stats.tz, 'UTC');
+  assert.equal(g.stats.days.length, 30);
+  for (const p of [{ tz: 'Mars/Base' }, { days: 0 }, { days: 401 }, { days: 1.5 }, { stats: 'yes' }])
+    await expectStatus(await rpc('link.read', { code: link.code, stats: true, ...p }), 400, JSON.stringify(p));
+  await expectStatus(await rpc('link.read', { stats: true }), 400); // needs one link
+  // deleting the link removes its stats; nothing to read afterwards
+  await expectStatus(await rpc('link.delete', { code: link.code }), 200);
+});
+
+test('qr.read: filter by link, and signed image links that need no token', async () => {
+  const k = await authorKey('image-user');
+  const l1 = await (await rpc('link.create', { url: 'https://example.com/one' }, k)).json();
+  const l2 = await (await rpc('link.create', { url: 'https://example.com/two' }, k)).json();
+  const d1 = await (await rpc('qr.create', { name: 'one', text: `${l1.short}#abc`, svg: SVG }, k)).json();
+  await (await rpc('qr.create', { name: 'two', text: l2.short, svg: SVG }, k)).json();
+  const { designs } = await (await rpc('qr.read', { link: l1.code.toUpperCase() }, k)).json();
+  assert.deepEqual(designs.map((d) => d.id), [d1.id]);
+  await expectStatus(await rpc('qr.read', { link: 'a-b' }, k), 400);
+
+  // the signed link works without a token, from anywhere
+  assert.ok(d1.svg_url.startsWith(w.base + '/q/' + d1.id + '.svg?sig='), d1.svg_url);
+  assert.match(new URL(d1.svg_url).searchParams.get('sig'), /^[A-Za-z0-9_-]{22}$/);
+  assert.equal(designs[0].svg_url, d1.svg_url);
+  const img = await fetch(d1.svg_url);
+  assert.equal(img.status, 200);
+  assert.match(img.headers.get('content-type'), /image\/svg\+xml/);
+  assert.equal(img.headers.get('cross-origin-resource-policy'), 'cross-origin');
+  assert.equal(await img.text(), SVG);
+  // wrong, missing or another code's signature: 404
+  const sig = new URL(d1.svg_url).searchParams.get('sig');
+  for (const p of [`/q/${d1.id}.svg`, `/q/${d1.id}.svg?sig=${sig.replace(/^./, (c) => (c === 'A' ? 'B' : 'A'))}`, `/q/${d1.id + 1}.svg?sig=${sig}`, `/q/x.svg?sig=${sig}`, '/q/'])
+    await expectStatus(await call(p), 404, p);
+  // rotating the author's token revokes their image links
+  await expectStatus(await rpc('author.update', { name: 'image-user', rotate_token: true }), 200);
+  await expectStatus(await fetch(d1.svg_url), 404);
+  const fresh = await (await rpc('qr.read', { id: d1.id })).json();
+  assert.notEqual(fresh.svg_url, d1.svg_url);
+  await expectStatus(await fetch(fresh.svg_url), 200);
+});

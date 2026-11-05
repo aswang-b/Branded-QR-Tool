@@ -1,6 +1,8 @@
 // Short-link redirect Worker and API.
 //
-//   GET /c/<code>   302 to the stored destination (public)
+//   GET /c/<code>           302 to the stored destination (public)
+//   GET /q/<id>.svg?sig=…   a saved code's SVG, for <img> tags elsewhere: the
+//                           signed svg_url from qr.read (no token needed)
 //
 // The API is a set of named methods, <domain>.<create|read|update|delete>,
 // called as POST /api/<method> with a JSON body (read methods also accept
@@ -8,14 +10,16 @@
 // closest method: listing is a read without an id, the raw SVG is a read with
 // format "svg".
 //
-//   link.create  {url, label?, author?}                           admin, author*
-//   link.read    {code} -> one link | {author?, limit?, offset?} -> list
-//                                                                 admin, author*
-//   link.update  {code, url?, label?, new_author?}                admin, author*
+//   link.create  {url, label?, author?, key?}                     admin, author*
+//                (with a key, a repeat create returns the existing link, 200)
+//   link.read    {code | key, stats?, tz?, days?} -> one link (+ daily scans)
+//                {author?, limit?, offset?} -> list                admin, author*
+//   link.update  {code, url?, label?, new_author?, if_url?}       admin, author*
+//                (if_url: 409 unless the link still points there)
 //   link.delete  {code}                                           admin
 //   qr.create    {name, text, svg, details?, author?, meta?, image?}  admin, author*
 //   qr.read      {id, format?: "json"|"svg"} -> one design (with svg and logo)
-//                {author?, limit?, offset?} -> list (no svg)       admin, author*
+//                {author?, link?, limit?, offset?} -> list (no svg) admin, author*
 //   qr.update    {id, name?, details?, text + svg?, meta?, image?, new_author?}
 //                                                                 admin, author*
 //   qr.delete    {id}                                             admin, author*
@@ -33,6 +37,10 @@
 // Everything else is served from the static assets (see wrangler.jsonc: the
 // Worker only runs for /c/* and /api/*, so the site itself stays free of
 // per-request Worker invocations).
+//
+// Image links (/q/…) are signed with ADMIN_TOKEN over the design id and its
+// author's current token hash, so rotating that author's token (or the admin
+// token) revokes them.
 //
 // Auth: Authorization: Bearer <token>. ADMIN_TOKEN (a Wrangler secret) can do
 // everything. Author tokens are made with author.create, one per author, for
@@ -62,6 +70,8 @@ const MAX_TEXT_LENGTH = 4296; // largest QR payload
 const MAX_META_LENGTH = 16 * 1024;
 const MAX_IMAGE_LENGTH = 300_000; // source logo, as a PNG data URL
 const MAX_AUTHOR_LENGTH = 200;
+const MAX_KEY_LENGTH = 100;
+const MAX_STATS_DAYS = 400;
 
 // ---------------------------------------------------------------- codes
 
@@ -322,6 +332,23 @@ function ensureSchema(db) {
        )`,
     ).run())
     .then(() => db.prepare('CREATE INDEX IF NOT EXISTS designs_author ON designs (author, id)').run())
+    .then(() => addColumn(db, 'links', 'updated_at INTEGER'))
+    // A caller's own name for a link (link.create {key}), unique per author.
+    .then(() => addColumn(db, 'links', 'client_key TEXT'))
+    .then(() => db.batch([
+      db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS links_key ON links (author, client_key) WHERE client_key IS NOT NULL'),
+      db.prepare('CREATE INDEX IF NOT EXISTS designs_link ON designs (link_id, id)'),
+      // Scans per link per UTC hour (hour = Unix seconds / 3600), so a caller
+      // can group them into days in any time zone.
+      db.prepare(
+        `CREATE TABLE IF NOT EXISTS link_hits_hourly (
+           link_id INTEGER NOT NULL,
+           hour INTEGER NOT NULL,
+           hits INTEGER NOT NULL DEFAULT 0,
+           PRIMARY KEY (link_id, hour)
+         ) WITHOUT ROWID`,
+      ),
+    ]))
     .catch((e) => {
       schemaReady = null;
       throw e;
@@ -347,13 +374,15 @@ function present(row, base) {
     url: row.url,
     label: row.label,
     author: row.author ?? '',
+    key: row.client_key ?? null,
     hits: row.hits ?? 0,
     created_at: row.created_at,
+    updated_at: row.updated_at ?? row.created_at,
     last_hit: row.last_hit ?? null,
   };
 }
 
-function presentDesign(row, base, { withSvg = false } = {}) {
+function presentDesign(row, base, { withSvg = false, svgUrl = null } = {}) {
   let meta = {};
   try { meta = JSON.parse(row.meta || '{}'); } catch { /* keep {} */ }
   const out = {
@@ -365,6 +394,7 @@ function presentDesign(row, base, { withSvg = false } = {}) {
     link: row.link_id ? { code: encodeId(row.link_id), short: `${base}/c/${encodeId(row.link_id)}`, url: row.link_url ?? null } : null,
     meta,
     created_at: row.created_at,
+    svg_url: svgUrl,
   };
   if (withSvg) { out.svg = row.svg; out.image = row.image ?? null; }
   return out;
@@ -380,11 +410,13 @@ async function redirect(request, env, ctx, rawCode) {
   const row = await env.DB.prepare('SELECT url FROM links WHERE id = ?').bind(id).first();
   if (!row) return notFound();
   if (request.method === 'GET') {
+    const now = Math.floor(Date.now() / 1000);
     ctx.waitUntil(
-      env.DB.prepare('UPDATE links SET hits = hits + 1, last_hit = ? WHERE id = ?')
-        .bind(Math.floor(Date.now() / 1000), id)
-        .run()
-        .catch((e) => console.error('hit counter failed', e)),
+      env.DB.batch([
+        env.DB.prepare('UPDATE links SET hits = hits + 1, last_hit = ? WHERE id = ?').bind(now, id),
+        env.DB.prepare('INSERT INTO link_hits_hourly (link_id, hour, hits) VALUES (?, ?, 1) ON CONFLICT (link_id, hour) DO UPDATE SET hits = hits + 1')
+          .bind(id, Math.floor(now / 3600)),
+      ]).catch((e) => console.error('hit counter failed', e)),
     );
   }
   // 302 (not 301): destinations can be edited later, so browsers must not cache it.
@@ -400,8 +432,9 @@ async function redirect(request, env, ctx, rawCode) {
 
 // ---------------------------------------------------------------- API methods
 
-const DESIGN_COLUMNS = 'd.id, d.name, d.details, d.author, d.text, d.link_id, d.meta, d.created_at, l.url AS link_url';
-const LINK_COLUMNS = 'id, url, label, author, created_at, hits, last_hit';
+const DESIGN_COLUMNS = 'd.id, d.name, d.details, d.author, d.text, d.link_id, d.meta, d.created_at, l.url AS link_url, a.token_hash AS author_token_hash';
+const DESIGN_FROM = "designs d LEFT JOIN links l ON l.id = d.link_id LEFT JOIN authors a ON a.name = d.author AND d.author != ''";
+const LINK_COLUMNS = 'id, url, label, author, created_at, updated_at, client_key, hits, last_hit';
 
 function parsePage(p) {
   return {
@@ -538,23 +571,94 @@ const authorWhere = (author, column = 'author') => (author === null ? ['', []] :
 const ownerFor = (p, who) =>
   who.role === 'author' ? authorScope(p, who) : parseText(p.author, 'author', MAX_AUTHOR_LENGTH, { required: false });
 
-const linkCreate = async ({ req, env, base, p, who }) => {
-  const row = await env.DB.prepare(`INSERT INTO links (url, label, author, created_at) VALUES (?, ?, ?, ?) RETURNING ${LINK_COLUMNS}`)
-    .bind(
-      parseDestination(p.url, shortLinkHosts(req, env)), parseLabel(p.label),
-      ownerFor(p, who), Math.floor(Date.now() / 1000),
-    )
-    .first();
-  return json(present(row, base), 201);
+/** A caller-chosen key for a link: letters, digits and . _ : - only. */
+function parseKey(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !new RegExp(`^[A-Za-z0-9._:-]{1,${MAX_KEY_LENGTH}}$`).test(value))
+    throw new HttpError(400, `"key" must be 1-${MAX_KEY_LENGTH} characters of letters, digits and . _ : -`);
+  return value;
+}
+
+const parseBool = (v, field) => {
+  if (v === undefined) return false;
+  if (![true, false, 'true', 'false'].includes(v)) throw new HttpError(400, `"${field}" must be true or false`);
+  return v === true || v === 'true';
 };
+
+const linkByKey = (env, author, key) =>
+  env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE author = ? AND client_key = ?`).bind(author, key).first();
+
+const linkCreate = async ({ req, env, base, p, who }) => {
+  const url = parseDestination(p.url, shortLinkHosts(req, env));
+  const label = parseLabel(p.label);
+  const author = ownerFor(p, who);
+  const key = parseKey(p.key);
+  // Idempotent with a key: a retried create returns the link it made the first time.
+  if (key) {
+    const existing = await linkByKey(env, author, key);
+    if (existing) return json(present(existing, base), 200);
+  }
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    const row = await env.DB.prepare(`INSERT INTO links (url, label, author, client_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING ${LINK_COLUMNS}`)
+      .bind(url, label, author, key, now, now)
+      .first();
+    return json(present(row, base), 201);
+  } catch (e) {
+    // Two creates with the same key at once: the loser returns the winner's link.
+    if (key && /UNIQUE/i.test(String(e?.message ?? e))) {
+      const existing = await linkByKey(env, author, key);
+      if (existing) return json(present(existing, base), 200);
+    }
+    throw e;
+  }
+};
+
+/** YYYY-MM-DD of an instant in a time zone. */
+const dateIn = (fmt, ms) => fmt.format(new Date(ms));
+
+/** Scans per day for one link over the last `days` days (today last), in time zone `tz`. */
+async function linkStats(env, id, p) {
+  const tz = p.tz === undefined ? 'UTC' : p.tz;
+  let fmt;
+  try {
+    if (typeof tz !== 'string' || !tz) throw new Error();
+    fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+  } catch {
+    throw new HttpError(400, '"tz" must be an IANA time zone, e.g. "America/New_York"');
+  }
+  const days = p.days === undefined ? 30 : Number(p.days);
+  if (!Number.isInteger(days) || days < 1 || days > MAX_STATS_DAYS) throw new HttpError(400, `"days" must be a whole number from 1 to ${MAX_STATS_DAYS}`);
+  // The last `days` calendar dates in tz, by date arithmetic (immune to DST).
+  const now = Date.now();
+  const [y, m, d] = dateIn(fmt, now).split('-').map(Number);
+  const dates = Array.from({ length: days }, (_, i) => new Date(Date.UTC(y, m - 1, d - (days - 1 - i))).toISOString().slice(0, 10));
+  const counts = new Map(dates.map((date) => [date, 0]));
+  // Every hour that could fall on those dates (time zones are within ±14 h of UTC).
+  const fromHour = Math.floor((Date.UTC(y, m - 1, d - (days - 1)) - 15 * 3600_000) / 3600_000);
+  const { results } = await env.DB.prepare('SELECT hour, hits FROM link_hits_hourly WHERE link_id = ? AND hour >= ?').bind(id, fromHour).all();
+  for (const r of results) {
+    const date = dateIn(fmt, r.hour * 3600_000);
+    if (counts.has(date)) counts.set(date, counts.get(date) + r.hits);
+  }
+  return { tz, days: dates.map((date) => ({ date, hits: counts.get(date) })) };
+}
 
 // Links belong to an author like designs do: an author token only reaches its own.
 const linkRead = async ({ env, base, p, who }) => {
-  const [scope, scopeArgs] = authorWhere(authorScope(p, who));
-  if (p.code !== undefined) {
-    const row = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE id = ?${scope}`).bind(parseLinkCode(p.code), ...scopeArgs).first();
-    return row ? json(present(row, base)) : json({ error: 'Not found' }, 404);
+  const author = authorScope(p, who);
+  const [scope, scopeArgs] = authorWhere(author);
+  if (p.code !== undefined || p.key !== undefined) {
+    if (p.code !== undefined && p.key !== undefined) throw new HttpError(400, 'Send "code" or "key", not both');
+    const withStats = parseBool(p.stats, 'stats');
+    // Keys are per author: the admin looks one up under "author" (default none).
+    const row = p.code !== undefined
+      ? await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE id = ?${scope}`).bind(parseLinkCode(p.code), ...scopeArgs).first()
+      : await linkByKey(env, author ?? '', parseKey(p.key));
+    if (!row) return json({ error: 'Not found' }, 404);
+    return json(withStats ? { ...present(row, base), stats: await linkStats(env, row.id, p) } : present(row, base));
   }
+  if (p.stats !== undefined) throw new HttpError(400, '"stats" needs a "code" or "key"');
   const { limit, offset } = parsePage(p);
   const { results } = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE 1 = 1${scope} ORDER BY id DESC LIMIT ? OFFSET ?`)
     .bind(...scopeArgs, limit, offset)
@@ -574,20 +678,74 @@ const linkUpdate = async ({ req, env, base, p, who }) => {
     sets.push('author = ?'); args.push(parseText(p.new_author, 'new_author', MAX_AUTHOR_LENGTH, { required: false }));
   }
   if (!sets.length) throw new HttpError(400, 'Nothing to update: send "url", "label" and/or "new_author"');
-  const row = await env.DB.prepare(`UPDATE links SET ${sets.join(', ')} WHERE id = ?${scope} RETURNING ${LINK_COLUMNS}`).bind(...args, id, ...scopeArgs).first();
-  return row ? json(present(row, base)) : json({ error: 'Not found' }, 404);
+  sets.push('updated_at = ?'); args.push(Math.floor(Date.now() / 1000));
+  // if_url: only change the link if it still points where the caller last saw it.
+  let guard = ['', []];
+  if (p.if_url !== undefined) {
+    if (typeof p.if_url !== 'string') throw new HttpError(400, '"if_url" must be a string');
+    let expected = p.if_url.trim();
+    try { expected = new URL(expected).href; } catch { /* compare as given */ }
+    guard = [' AND url = ?', [expected]];
+  }
+  const row = await env.DB.prepare(`UPDATE links SET ${sets.join(', ')} WHERE id = ?${scope}${guard[0]} RETURNING ${LINK_COLUMNS}`)
+    .bind(...args, id, ...scopeArgs, ...guard[1]).first();
+  if (row) return json(present(row, base));
+  if (guard[0]) {
+    const current = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE id = ?${scope}`).bind(id, ...scopeArgs).first();
+    if (current) return json({ error: 'The link no longer points at if_url: someone changed it. Nothing was updated.', link: present(current, base) }, 409);
+  }
+  return json({ error: 'Not found' }, 404);
 };
 
 const linkDelete = async ({ env, p }) => {
   const id = parseLinkCode(p.code);
-  const res = await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id).run();
+  const [res] = await env.DB.batch([
+    env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id),
+    env.DB.prepare('DELETE FROM link_hits_hourly WHERE link_id = ?').bind(id),
+  ]);
   return res.meta?.changes ? json({ deleted: encodeId(id) }) : json({ error: 'Not found' }, 404);
 };
 
 const fetchDesign = (db, id, author, extra = '') =>
-  db.prepare(`SELECT ${DESIGN_COLUMNS}${extra} FROM designs d LEFT JOIN links l ON l.id = d.link_id WHERE d.id = ?${author === null ? '' : ' AND d.author = ?'}`)
+  db.prepare(`SELECT ${DESIGN_COLUMNS}${extra} FROM ${DESIGN_FROM} WHERE d.id = ?${author === null ? '' : ' AND d.author = ?'}`)
     .bind(id, ...(author === null ? [] : [author]))
     .first();
+
+// ---------------------------------------------------------------- signed image links
+
+let signingKey = null; // [ADMIN_TOKEN, CryptoKey]
+async function imageSig(env, id, authorTokenHash) {
+  if (signingKey?.[0] !== env.ADMIN_TOKEN) {
+    signingKey = [env.ADMIN_TOKEN, await crypto.subtle.importKey('raw', new TextEncoder().encode(env.ADMIN_TOKEN), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])];
+  }
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', signingKey[1], new TextEncoder().encode(`qr-image:${id}:${authorTokenHash ?? ''}`)));
+  return btoa(String.fromCharCode(...mac.slice(0, 16))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+const svgUrlFor = async (env, base, row) => `${base}/q/${row.id}.svg?sig=${await imageSig(env, row.id, row.author_token_hash)}`;
+
+/** A design (with its signed image link) as returned by the API. */
+const designOut = async (env, base, row, opts = {}) => presentDesign(row, base, { ...opts, svgUrl: await svgUrlFor(env, base, row) });
+
+async function signedImage(request, env, rawId, url) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
+  const sig = url.searchParams.get('sig') || '';
+  if (!env.ADMIN_TOKEN || !sig || !/^[1-9][0-9]{0,15}$/.test(rawId)) return notFound();
+  await ensureSchema(env.DB);
+  const row = await env.DB.prepare(`SELECT d.id, d.svg, a.token_hash AS author_token_hash FROM ${DESIGN_FROM} WHERE d.id = ?`).bind(Number(rawId)).first();
+  // Same answer for a missing code and a wrong or revoked signature.
+  if (!row || !(await safeEqual(sig, await imageSig(env, row.id, row.author_token_hash)))) return notFound();
+  return new Response(request.method === 'HEAD' ? null : row.svg, { headers: { ...SVG_HEADERS, 'Cache-Control': 'public, max-age=300' } });
+}
+
+const SVG_HEADERS = {
+  'Content-Type': 'image/svg+xml; charset=utf-8',
+  'X-Content-Type-Options': 'nosniff',
+  // Saved SVGs are validated on save; belt and braces if one is opened directly.
+  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+  // Other sites may show it in an <img>.
+  'Cross-Origin-Resource-Policy': 'cross-origin',
+};
 
 const qrCreate = async ({ req, env, base, p, who }) => {
   const text = parseText(p.text, 'text', MAX_TEXT_LENGTH);
@@ -599,7 +757,7 @@ const qrCreate = async ({ req, env, base, p, who }) => {
       text, linkIdFor(text, req, env), parseSvg(p.svg), parseMeta(p.meta), parseImage(p.image), Math.floor(Date.now() / 1000),
     )
     .first();
-  return json(presentDesign(await fetchDesign(env.DB, id, null), base), 201);
+  return json(await designOut(env, base, await fetchDesign(env.DB, id, null)), 201);
 };
 
 const qrRead = async ({ env, base, p, who }) => {
@@ -609,24 +767,23 @@ const qrRead = async ({ env, base, p, who }) => {
     if (format !== 'json' && format !== 'svg') throw new HttpError(400, '"format" must be "json" or "svg"');
     const row = await fetchDesign(env.DB, parseDesignId(p.id), author, ', d.svg, d.image');
     if (!row) return json({ error: 'Not found' }, 404);
-    if (format === 'json') return json(presentDesign(row, base, { withSvg: true }));
+    if (format === 'json') return json(await designOut(env, base, row, { withSvg: true }));
     // The raw image, for another project's server to inline or serve itself.
-    return new Response(row.svg, {
-      headers: {
-        'Content-Type': 'image/svg+xml; charset=utf-8',
-        'Cache-Control': 'private, max-age=300',
-        'X-Content-Type-Options': 'nosniff',
-        // Saved SVGs are validated on save; belt and braces if one is opened directly.
-        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-      },
-    });
+    return new Response(row.svg, { headers: { ...SVG_HEADERS, 'Cache-Control': 'private, max-age=300' } });
   }
   const { limit, offset } = parsePage(p);
-  const where = author === null ? '' : ' WHERE d.author = ?';
-  const { results } = await env.DB.prepare(`SELECT ${DESIGN_COLUMNS} FROM designs d LEFT JOIN links l ON l.id = d.link_id${where} ORDER BY d.id DESC LIMIT ? OFFSET ?`)
-    .bind(...(author === null ? [] : [author]), limit, offset)
+  const where = [], args = [];
+  if (author !== null) { where.push('d.author = ?'); args.push(author); }
+  // Codes that open one short link, e.g. every design made for a check-in link.
+  if (p.link !== undefined) {
+    const linkId = typeof p.link === 'string' ? decodeCode(p.link.trim().toLowerCase()) : null;
+    if (linkId === null) throw new HttpError(400, '"link" must be a short code, e.g. "c"');
+    where.push('d.link_id = ?'); args.push(linkId);
+  }
+  const { results } = await env.DB.prepare(`SELECT ${DESIGN_COLUMNS} FROM ${DESIGN_FROM}${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY d.id DESC LIMIT ? OFFSET ?`)
+    .bind(...args, limit, offset)
     .all();
-  return json({ designs: results.map((r) => presentDesign(r, base)) });
+  return json({ designs: await Promise.all(results.map((r) => designOut(env, base, r))) });
 };
 
 const qrUpdate = async ({ req, env, base, p, who }) => {
@@ -654,7 +811,7 @@ const qrUpdate = async ({ req, env, base, p, who }) => {
   const scope = author === null ? ['', []] : [' AND author = ?', [author]];
   const res = await env.DB.prepare(`UPDATE designs SET ${sets.join(', ')} WHERE id = ?${scope[0]}`).bind(...args, id, ...scope[1]).run();
   if (!res.meta?.changes) return json({ error: 'Not found' }, 404);
-  return json(presentDesign(await fetchDesign(env.DB, id, null), base));
+  return json(await designOut(env, base, await fetchDesign(env.DB, id, null)));
 };
 
 const qrDelete = async ({ env, p, who }) => {
@@ -705,6 +862,9 @@ export default {
       const short = /^\/c\/([A-Za-z0-9]+)\/?$/.exec(url.pathname);
       if (short) return await redirect(request, env, ctx, short[1]);
       if (url.pathname.startsWith('/c/') || url.pathname === '/c') return notFound();
+      const image = /^\/q\/([0-9]+)\.svg$/.exec(url.pathname);
+      if (image) return await signedImage(request, env, image[1], url);
+      if (url.pathname.startsWith('/q/')) return notFound();
       if (url.pathname.startsWith('/api/')) return await api(request, env, url, ctx);
       return env.ASSETS ? env.ASSETS.fetch(request) : notFound();
     } catch (e) {

@@ -411,6 +411,14 @@ async function save(e) {
       },
       image: lastLogo,
     });
+    if (returnTo) {
+      // Back to the project that sent us here, telling it which code was saved.
+      const back = new URL(returnTo);
+      back.searchParams.set('qr_id', String(saved.id));
+      msg.textContent = `${replace ? 'Replaced' : 'Saved'}. Returning to ${back.host}…`;
+      location.assign(back.href);
+      return;
+    }
     msg.innerHTML = `${replace ? 'Replaced' : 'Saved'}. <a href="saved.html">See saved codes</a>`;
     if (replace) setEditing({ id: saved.id, name: saved.name });
   } catch (err) {
@@ -516,10 +524,28 @@ async function loadForEdit(id) {
 const params = new URLSearchParams(location.search);
 const presetText = params.get('text');
 if (presetText) $('text').value = presetText;
+
+/**
+ * ?return=<url>: where to send the browser after a save (with ?qr_id=<id>), for
+ * projects that open the generator to make a design. https only (or a local
+ * dev server), so a link can't bounce people to javascript: or plain http.
+ */
+function parseReturn(value) {
+  if (!value) return null;
+  try {
+    const u = new URL(value);
+    const local = u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+    return u.protocol === 'https:' || local ? u.href : null;
+  } catch { return null; }
+}
+const returnTo = parseReturn(params.get('return'));
 syncLabels();
 checkColors();
 setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'dancewithb.fun logo');
-$('saveAuthor').value = store('localStorage')?.getItem('qrAuthor') || '';
+$('saveAuthor').value = params.get('author') ?? (store('localStorage')?.getItem('qrAuthor') || '');
+if (params.get('name')) $('saveName').value = params.get('name');
+if (returnTo) $('saveMsg').textContent = `After saving you'll go back to ${new URL(returnTo).host}.`;
+else if (params.get('return')) $('saveMsg').textContent = 'Ignoring the return link: it must be an https:// address.';
 // Suggest authorized authors (see Authors) in the save form's Author field.
 // author.read without include_tokens returns names, never tokens.
 function loadAuthorSuggestions() {
