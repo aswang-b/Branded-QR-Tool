@@ -706,8 +706,11 @@ function batchName(template, code) {
 
 /**
  * Make and save one code per link in the look of saved code `from`.
- * cfg: {codes, from?, nameTemplate?, author?, report?(result)}; each result is
- * {link, status: "saved"|"existing"|"failed", id?, name?, svg_url?, reliability?, error?}.
+ * cfg: {codes, from?, nameTemplate?, author?, settings?, replace?, report?(result)}.
+ * settings (e.g. {contrast: "0.56"}) apply on top of the template's; replace
+ * remakes links that already have a code instead of skipping them. Each result is
+ * {link, status: "saved"|"replaced"|"existing"|"failed", id?, name?, svg_url?,
+ *  reliability?, contrast?, replaced?: [old ids], error?}.
  * If it has to stop early (e.g. the token stops working), it throws an error
  * whose `results` holds what was done before, so saved codes aren't lost.
  */
@@ -728,6 +731,9 @@ async function runBatch(cfg) {
       from = await api('qr.read', { id: cfg.from });
       await applyStyleOf(from);
     }
+    // The template's own contrast, to fall back on if an override scans badly.
+    const baseContrast = $('contrast').value;
+    if (cfg.settings && Object.keys(cfg.settings).length) applySettings(cfg.settings);
     const tpl = from?.meta || {};
     const author = who.role === 'author' ? who.author : (cfg.author ?? from?.author ?? '');
     const nameTemplate = cfg.nameTemplate || from?.name || '';
@@ -740,7 +746,7 @@ async function runBatch(cfg) {
         row.set('Checking the link…');
         const link = await api('link.read', { code });
         const { designs } = await api('qr.read', { link: code, limit: 1 });
-        if (designs.length) {
+        if (designs.length && !cfg.replace) {
           const d = designs[0];
           row.image(d.svg_url);
           row.set(`Already has a code: "${d.name}" (#${d.id})`, 'ok');
@@ -749,7 +755,21 @@ async function runBatch(cfg) {
         }
         row.set('Generating…');
         $('text').value = link.short;
-        const c = await designFor(readRequest(), tpl);
+        let c = await designFor(readRequest(), tpl);
+        // A brighter contrast than the template's can stop a code scanning
+        // reliably: then make it at the template's contrast instead.
+        const wanted = $('contrast').value;
+        if (!phoneSafe(c) && wanted !== baseContrast) {
+          row.set('Generating at the standard contrast…');
+          $('contrast').value = baseContrast;
+          try {
+            const plain = await designFor(readRequest(), tpl);
+            if (phoneSafe(plain)) c = plain;
+          } finally {
+            $('contrast').value = wanted;
+          }
+        }
+        lastSettings = { ...readSettings(), contrast: String(c.style.maxLum) };
         row.set('Saving…');
         const saved = await api('qr.create', {
           ...(author ? { author } : {}),
@@ -761,8 +781,14 @@ async function runBatch(cfg) {
           image: lastLogo,
         });
         row.image(saved.svg_url);
-        row.set(`Saved "${saved.name}" (#${saved.id}), ${pct(c.score.reliability)} scan rate`, 'ok');
-        done({ link: code, status: 'saved', id: saved.id, name: saved.name, svg_url: saved.svg_url, reliability: c.score.reliability });
+        const contrast = String(c.style.maxLum);
+        const fellBack = contrast !== $('contrast').value ? ` (at the standard contrast: ${$('contrast').selectedOptions[0]?.textContent.split(' (')[0] || 'this'} didn't scan reliably)` : '';
+        const replaced = saved.replaced?.length ? `, replacing #${saved.replaced.join(', #')}` : '';
+        row.set(`Saved "${saved.name}" (#${saved.id}), ${pct(c.score.reliability)} scan rate${replaced}${fellBack}`, 'ok');
+        done({
+          link: code, status: saved.replaced?.length ? 'replaced' : 'saved', id: saved.id, name: saved.name, svg_url: saved.svg_url,
+          reliability: c.score.reliability, contrast, ...(saved.replaced ? { replaced: saved.replaced } : {}),
+        });
       } catch (err) {
         const error = err.status === 404 ? 'Not found: not a short link you can use' : err.message;
         row.set(error, 'bad');
@@ -785,6 +811,10 @@ async function runBatch(cfg) {
   return results;
 }
 
+// Generator settings in the batch link override the template's, e.g. &contrast=0.56.
+const batchSettings = Object.fromEntries(SETTING_IDS.filter((id) => params.has(id))
+  .map((id) => [id, id === 'tintLight' ? params.get(id) === 'true' : params.get(id)]));
+
 /** Full-page batch (?batch=…): runs when the user presses the button. */
 async function startPageBatch() {
   if (!getToken()) {
@@ -795,7 +825,7 @@ async function startPageBatch() {
   }
   let results = [];
   try {
-    results = await runBatch({ codes: batchCodes, from: batchFrom, nameTemplate: params.get('name'), author: linkAuthor });
+    results = await runBatch({ codes: batchCodes, from: batchFrom, nameTemplate: params.get('name'), author: linkAuthor, settings: batchSettings });
   } catch (err) {
     results = err.results || []; // the error is shown; still offer the codes made before it
   }
@@ -868,7 +898,7 @@ async function startEmbed() {
   requestAnimationFrame(sendSize);
   try {
     const results = await runBatch({
-      codes: ticket.links, from: ticket.from, nameTemplate: ticket.name,
+      codes: ticket.links, from: ticket.from, nameTemplate: ticket.name, settings: ticket.settings, replace: ticket.replace,
       report: (r) => { post({ type: 'qr-progress', ...r }); requestAnimationFrame(sendSize); },
     });
     post({ type: 'qr-done', results });

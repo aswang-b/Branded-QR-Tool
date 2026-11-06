@@ -150,7 +150,7 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 | `author.read` | `include_tokens?` | `{authors: […]}` (tokens only when asked) | admin |
 | `author.update` | `name`, `new_name?`, `rotate_token?`, `adopt_existing?` | the author | admin |
 | `author.delete` | `name` | `{deleted}` | admin |
-| `ticket.create` | `links`, `parent`, `from?`, `name?`, `author?` (admin) | `{url, …}`: a short-lived `/embed` ticket (201) | admin, author |
+| `ticket.create` | `links`, `parent`, `from?`, `name?`, `settings?`, `replace?`, `author?` (admin) | `{url, …}`: a short-lived `/embed` ticket (201) | admin, author |
 | `ticket.read` | | what the calling ticket covers (used by `/embed`; 400 without a ticket) | ticket |
 | `spec.read` | | the specification (for an author: what their token can call) | admin, author |
 
@@ -209,6 +209,11 @@ that was already generated). Other projects use them through the API with their 
   the saved name, details and logo come from the ticket and `from`, not the browser. The embed page
   never reads or changes the sign-in stored for the main site. Only origins in `EMBED_PARENTS`
   (`wrangler.jsonc`) may frame `/embed` or be a ticket's `parent`.
+  `settings` (e.g. `{"contrast": "0.56"}` for vivid colours) override the `from` code's generator
+  settings; a code that won't scan reliably at the requested contrast is made at the template's
+  (each result says which `contrast` was used). `replace: true` remakes links that already have a code
+  and deletes their old codes once the new one is saved. The full-page batch link takes the same
+  settings as query parameters, e.g. `&contrast=0.56`.
 - **Make codes for many links at once (batch):** open
   `https://qr.dancewithb.fun/?batch=d,e,f&from=<saved code id>&name=Door%20sign%20{code}&return=<https url>`.
   After the admin presses **Make N codes**, it makes and saves one code per short link (up to 25) in

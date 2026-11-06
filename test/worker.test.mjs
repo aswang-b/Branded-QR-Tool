@@ -781,7 +781,7 @@ test('ticket.create: an embed ticket covering only its links, template and one c
 
   // what the embed page needs
   assert.deepEqual(await (await rpc('ticket.read', {}, T)).json(),
-    { author: 'embed-user', links: [l1.code, l2.code], from: tpl.id, name: 'Door sign {code}', parent: 'https://dancewithb.fun', expires_at: made.expires_at });
+    { author: 'embed-user', links: [l1.code, l2.code], from: tpl.id, name: 'Door sign {code}', settings: {}, replace: false, parent: 'https://dancewithb.fun', expires_at: made.expires_at });
   assert.equal((await (await rpc('spec.read', {}, T)).json()).viewer.author, 'embed-user');
   await expectStatus(await rpc('link.read', { code: l1.code }, T), 200);
   await expectStatus(await rpc('qr.read', { id: tpl.id }, T), 200);
@@ -868,4 +868,50 @@ test('/embed: the generator page, frameable only by EMBED_PARENTS', async () => 
   const slash = await call('/embed/?x=1', { redirect: 'manual' });
   assert.equal(slash.status, 308);
   assert.equal(slash.headers.get('location'), '/embed?x=1');
+});
+
+test('ticket.create settings: generator overrides such as vivid contrast, validated', async () => {
+  const k = await authorKey('vivid-user');
+  const l = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in?sign=v' }, k)).json();
+  const base = { links: [l.code], parent: 'https://dancewithb.fun' };
+  const made = await (await rpc('ticket.create', { ...base, settings: { contrast: 0.56, shape: 'dots', tintLight: false } }, k)).json();
+  assert.deepEqual(made.settings, { contrast: '0.56', shape: 'dots', tintLight: false });
+  assert.equal(made.replace, false);
+  const T = { Authorization: `Bearer ${new URL(made.url).hash.slice(3)}` };
+  const read = await (await rpc('ticket.read', {}, T)).json();
+  assert.deepEqual(read.settings, { contrast: '0.56', shape: 'dots', tintLight: false });
+  // unknown keys and bad values are refused, naming them
+  let r = await rpc('ticket.create', { ...base, settings: { contrast: '0.56', colour: 'red', foo: 1 } }, k);
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /colour, foo/);
+  for (const settings of [{ contrast: '0.5' }, { fg: 'red' }, { imgsize: 10 }, { tintLight: 'yes' }, 'vivid', ['contrast']]) {
+    await expectStatus(await rpc('ticket.create', { ...base, settings }, k), 400, JSON.stringify(settings));
+  }
+  await expectStatus(await rpc('ticket.create', { ...base, replace: 'yes' }, k), 400);
+});
+
+test('ticket.create replace: remakes a link that has a code, once, then removes the old one', async () => {
+  const k = await authorKey('replace-user');
+  const l = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in?sign=r' }, k)).json();
+  const old1 = await (await rpc('qr.create', { name: 'Old', text: l.short, svg: SVG }, k)).json();
+  const old2 = await (await rpc('qr.create', { name: 'Older copy', text: `${l.short}#x`, svg: SVG }, k)).json();
+  const other = await (await rpc('qr.create', { name: 'Admin copy', text: l.short, svg: SVG, author: 'someone-else' })).json();
+  // without replace: refused, as before
+  const plain = await (await rpc('ticket.create', { links: [l.code], parent: 'https://dancewithb.fun' }, k)).json();
+  await expectStatus(await rpc('qr.create', { name: 'x', text: l.short, svg: SVG }, { Authorization: `Bearer ${new URL(plain.url).hash.slice(3)}` }), 409);
+  // with replace: one new code, the author's old ones removed
+  const t = await (await rpc('ticket.create', { links: [l.code], parent: 'https://dancewithb.fun', replace: true, name: 'Door sign {code}' }, k)).json();
+  assert.equal(t.replace, true);
+  const T = { Authorization: `Bearer ${new URL(t.url).hash.slice(3)}` };
+  assert.equal((await (await rpc('ticket.read', {}, T)).json()).replace, true);
+  const r = await rpc('qr.create', { name: 'ignored', text: `${l.short}#new`, svg: SVG }, T);
+  assert.equal(r.status, 201);
+  const made = await r.json();
+  assert.equal(made.name, `Door sign ${l.code}`);
+  assert.deepEqual(made.replaced, [old1.id, old2.id]);
+  for (const id of [old1.id, old2.id]) await expectStatus(await rpc('qr.read', { id }), 404);
+  await expectStatus(await rpc('qr.read', { id: other.id }), 200); // another author's code is left alone
+  // still only one per link per ticket
+  await expectStatus(await rpc('qr.create', { name: 'again', text: l.short, svg: SVG }, T), 409);
+  assert.deepEqual((await (await rpc('qr.read', { link: l.code }, k)).json()).designs.map((d) => d.id), [made.id]);
 });

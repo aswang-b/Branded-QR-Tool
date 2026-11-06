@@ -172,7 +172,7 @@ async function authorize(request, env, ctx) {
     // An embed ticket: acts as its author, limited by api() to what it covers.
     await ensureSchema(env.DB);
     const hash = await sha256Hex(given);
-    const t = await env.DB.prepare('SELECT author, links, from_id, name, parent, created_at, expires_at FROM tickets WHERE token_hash = ? AND expires_at > ?')
+    const t = await env.DB.prepare('SELECT author, links, from_id, name, parent, settings, replace_after, created_at, expires_at FROM tickets WHERE token_hash = ? AND expires_at > ?')
       .bind(hash, Math.floor(Date.now() / 1000)).first();
     if (!t) return unauthorized();
     // Sliding expiry: a ticket in use stays alive TICKET_TTL past its last use
@@ -186,7 +186,14 @@ async function authorize(request, env, ctx) {
           .catch((e) => console.error('ticket refresh failed', e)),
       );
     }
-    return { role: 'author', author: t.author, ticket: { links: JSON.parse(t.links), from: t.from_id, name: t.name, parent: t.parent, expires_at: Math.max(expires, t.expires_at) } };
+    return {
+      role: 'author', author: t.author,
+      ticket: {
+        links: JSON.parse(t.links), from: t.from_id, name: t.name, parent: t.parent,
+        settings: JSON.parse(t.settings || '{}'), replace: t.replace_after !== null, replaceAfter: t.replace_after,
+        created_at: t.created_at, expires_at: Math.max(expires, t.expires_at),
+      },
+    };
   }
   if (!given.startsWith('qra_')) return unauthorized();
   await ensureSchema(env.DB);
@@ -422,6 +429,10 @@ function ensureSchema(db) {
       // Revoking an author (author.update / author.delete) drops their tickets.
       db.prepare('CREATE INDEX IF NOT EXISTS tickets_author ON tickets (author)'),
     ]))
+    // Added later: generator settings to apply on top of the template, and
+    // whether the ticket remakes links that already have a code.
+    .then(() => addColumn(db, 'tickets', "settings TEXT NOT NULL DEFAULT '{}'"))
+    .then(() => addColumn(db, 'tickets', 'replace_after INTEGER'))
     .catch((e) => {
       schemaReady = null;
       throw e;
@@ -883,13 +894,21 @@ const qrCreate = async ({ req, env, base, p, who }) => {
   const cols = 'name, details, author, text, link_id, svg, meta, image, created_at';
   const marks = values.map(() => '?').join(', ');
   // A ticket saves one code per link: checked in the INSERT itself, so two
-  // saves at once can't both get in.
+  // saves at once can't both get in. A replace ticket only counts codes made
+  // since it was issued, and then removes the link's older codes.
+  const [since, sinceArgs] = who.ticket?.replace ? [' AND id > ?', [who.ticket.replaceAfter]] : ['', []];
   const row = who.ticket
-    ? await env.DB.prepare(`INSERT INTO designs (${cols}) SELECT ${marks} WHERE NOT EXISTS (SELECT 1 FROM designs WHERE link_id = ? AND author = ?) RETURNING id`)
-      .bind(...values, linkId, author).first()
+    ? await env.DB.prepare(`INSERT INTO designs (${cols}) SELECT ${marks} WHERE NOT EXISTS (SELECT 1 FROM designs WHERE link_id = ? AND author = ?${since}) RETURNING id`)
+      .bind(...values, linkId, author, ...sinceArgs).first()
     : await env.DB.prepare(`INSERT INTO designs (${cols}) VALUES (${marks}) RETURNING id`).bind(...values).first();
   if (!row) throw await ticketConflict(env, linkId, author);
-  return json(await designOut(env, base, await fetchDesign(env.DB, row.id, null), { who }), 201);
+  let replaced;
+  if (who.ticket?.replace) {
+    const { results } = await env.DB.prepare('DELETE FROM designs WHERE link_id = ? AND author = ? AND id != ? RETURNING id').bind(linkId, author, row.id).all();
+    replaced = results.map((r) => r.id).sort((a, b) => a - b);
+  }
+  const out = await designOut(env, base, await fetchDesign(env.DB, row.id, null), { who });
+  return json(replaced ? { ...out, replaced } : out, 201);
 };
 
 const qrRead = async ({ env, base, p, who }) => {
@@ -959,6 +978,36 @@ const qrDelete = async ({ env, p, who }) => {
 /** Origins allowed to frame /embed and receive its results (EMBED_PARENTS, space-separated). */
 const embedParents = (env) => (env.EMBED_PARENTS || '').split(/\s+/).filter(Boolean).map((o) => { try { return new URL(o).origin; } catch { return null; } }).filter(Boolean);
 
+// The generator's settings (public/index.html; saved in a code's meta.settings),
+// each as the form holds it: a string, or a boolean for the checkbox.
+const rangeOf = (min, max) => (v) => /^\d+$/.test(v) && +v >= min && +v <= max;
+const oneOf = (...values) => (v) => values.includes(v);
+const GENERATOR_SETTINGS = {
+  imgsize: rangeOf(30, 100), fill: rangeOf(30, 90), dotScale: rangeOf(70, 100), quiet: rangeOf(2, 6), printMm: rangeOf(10, 1000),
+  fit: oneOf('crop', 'pad'),
+  shape: oneOf('dots', 'rounded', 'squares', 'connected'),
+  eyes: oneOf('square', 'rounded', 'dot'),
+  contrast: oneOf('0.32', '0.4', '0.56'),
+  distance: oneOf('100', '150', '250', '400', '1000'),
+  fg: (v) => /^#[0-9a-f]{6}$/i.test(v), bg: (v) => /^#[0-9a-f]{6}$/i.test(v),
+  tintLight: (v) => v === true || v === false,
+};
+
+/** ticket.create's settings: known keys and values only (numbers are accepted for the numeric ones). */
+function parseGeneratorSettings(value) {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) throw new HttpError(400, '"settings" must be an object, e.g. {"contrast": "0.56"}');
+  const unknown = Object.keys(value).filter((k) => !Object.hasOwn(GENERATOR_SETTINGS, k));
+  if (unknown.length) throw new HttpError(400, `Unknown settings: ${unknown.join(', ')}. Known: ${Object.keys(GENERATOR_SETTINGS).join(', ')}`);
+  const out = {};
+  for (const [k, raw] of Object.entries(value)) {
+    const v = k === 'tintLight' ? raw : typeof raw === 'number' ? String(raw) : raw;
+    if (!GENERATOR_SETTINGS[k](v)) throw new HttpError(400, `Bad value for settings.${k}: ${JSON.stringify(raw).slice(0, 40)}`);
+    out[k] = v;
+  }
+  return out;
+}
+
 const ticketCreate = async ({ env, base, p, who }) => {
   // The ticket acts as one author: the caller's own, or (admin) the one named.
   const author = ownerFor(p, who);
@@ -980,25 +1029,30 @@ const ticketCreate = async ({ env, base, p, who }) => {
     if (!(await fetchDesign(env.DB, fromId, author))) throw new HttpError(404, `Saved code ${fromId} not found (or not ${author ? `"${author}"` : 'unowned'}'s)`);
   }
   const name = parseText(p.name, 'name', MAX_NAME_LENGTH, { required: false });
+  const settings = parseGeneratorSettings(p.settings);
+  if (p.replace !== undefined && typeof p.replace !== 'boolean') throw new HttpError(400, '"replace" must be true or false');
+  const replace = p.replace === true;
   let parent = null;
   try { parent = typeof p.parent === 'string' ? new URL(p.parent).origin : null; } catch { /* below */ }
   const allowed = embedParents(env);
   if (!parent || !allowed.includes(parent)) throw new HttpError(400, `"parent" must be the origin of the page that frames the generator, one of: ${allowed.join(', ') || '(none configured: set EMBED_PARENTS)'}`);
+  // A replace ticket counts only codes newer than this as its own (ids only grow).
+  const replaceAfter = replace ? (await env.DB.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM designs').first()).id : null;
   const token = newTicketToken();
   const now = Math.floor(Date.now() / 1000);
   await env.DB.batch([
     env.DB.prepare('DELETE FROM tickets WHERE expires_at < ?').bind(now - 86400),
-    env.DB.prepare('INSERT INTO tickets (token_hash, author, links, from_id, name, parent, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .bind(await sha256Hex(token), author, JSON.stringify(codes), fromId, name, parent, now, now + TICKET_TTL),
+    env.DB.prepare('INSERT INTO tickets (token_hash, author, links, from_id, name, parent, settings, replace_after, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(await sha256Hex(token), author, JSON.stringify(codes), fromId, name, parent, JSON.stringify(settings), replaceAfter, now, now + TICKET_TTL),
   ]);
-  return json({ url: `${base}/embed#t=${token}`, links: codes, from: fromId, name, parent, author, expires_at: now + TICKET_TTL }, 201);
+  return json({ url: `${base}/embed#t=${token}`, links: codes, from: fromId, name, settings, replace, parent, author, expires_at: now + TICKET_TTL }, 201);
 };
 
 // Open to every role so that the one check below answers anyone without a ticket.
 const ticketRead = async ({ who }) => {
   if (!who.ticket) throw new HttpError(400, 'ticket.read is called with a ticket ("qrt_…") as the token');
   const t = who.ticket;
-  return json({ author: who.author, links: t.links, from: t.from, name: t.name, parent: t.parent, expires_at: t.expires_at });
+  return json({ author: who.author, links: t.links, from: t.from, name: t.name, settings: t.settings, replace: t.replace, parent: t.parent, expires_at: t.expires_at });
 };
 
 /** The name a batch gives a link's code: the template with {code} filled in, or "<template> · <code>". */
@@ -1043,7 +1097,8 @@ async function checkTicket(name, p, who, req, env) {
     const id = typeof p.text === 'string' ? linkIdFor(p.text.trim(), req, env) : null;
     if (id === null || !t.links.includes(encodeId(id))) deny();
     // Early, friendly answer; qrCreate's INSERT enforces it for simultaneous saves.
-    if (await env.DB.prepare('SELECT 1 FROM designs WHERE link_id = ? AND author = ? LIMIT 1').bind(id, who.author).first()) throw await ticketConflict(env, id, who.author);
+    const [since, sinceArgs] = t.replace ? [' AND id > ?', [t.replaceAfter]] : ['', []];
+    if (await env.DB.prepare(`SELECT 1 FROM designs WHERE link_id = ? AND author = ?${since} LIMIT 1`).bind(id, who.author, ...sinceArgs).first()) throw await ticketConflict(env, id, who.author);
   }
 }
 
