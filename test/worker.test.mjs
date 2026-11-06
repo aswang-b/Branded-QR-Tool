@@ -811,9 +811,11 @@ test('/embed: the generator page, frameable only by EMBED_PARENTS', async () => 
   assert.equal(r.status, 200);
   assert.match(r.headers.get('content-security-policy'), /^frame-ancestors https:\/\/dancewithb\.fun http:\/\/localhost:4321$/);
   assert.equal(r.headers.get('referrer-policy'), 'no-referrer');
+  assert.equal(r.headers.get('x-frame-options'), null); // would block the iframe in older browsers
   assert.match(await r.text(), /id="batchPanel"/);
   // the normal site stays as it was
   const home = await call('/');
   assert.equal(home.headers.get('content-security-policy'), null);
+  assert.equal(home.headers.get('x-frame-options'), 'SAMEORIGIN'); // the rest of the site still refuses framing
   await home.arrayBuffer();
 });

@@ -986,6 +986,10 @@ async function embedPage(request, env) {
   const res = new Response(page.body, page);
   const parents = embedParents(env);
   res.headers.set('Content-Security-Policy', `frame-ancestors ${parents.length ? parents.join(' ') : "'none'"}`);
+  // _headers sends X-Frame-Options: SAMEORIGIN for the whole site; older
+  // browsers and some in-app webviews obey it over frame-ancestors, so drop it
+  // here, where frame-ancestors already says who may frame the page.
+  res.headers.delete('X-Frame-Options');
   res.headers.set('Referrer-Policy', 'no-referrer');
   res.headers.set('Cache-Control', 'no-store');
   return res;
