@@ -380,6 +380,15 @@ function exportSvg() {
   download(new Blob([toSVG(selected.rendered)], { type: 'image/svg+xml' }), `${fileBase()}.svg`);
 }
 
+/** What is stored with a saved code: its scores and the settings to regenerate it. */
+const metaFor = (c) => ({
+  set: c.set, grid: c.grid, size: c.size, ecl: c.ecl, strength: c.strength,
+  reliability: c.score.reliability, byDecoder: c.score.byDecoder, minMm: c.score.minMm,
+  match: c.match, printMm: lastPrint.mm, distanceMm: lastPrint.distanceMm, atPrint: c.score.atPrint,
+  style: { shape: c.style.shape, eyes: c.style.eyes, dotScale: c.style.dotScale, maxLum: c.style.maxLum },
+  link: c.link, settings: lastSettings,
+});
+
 async function save(e) {
   e.preventDefault();
   if (!selected) return;
@@ -406,13 +415,7 @@ async function save(e) {
       details: $('saveDetails').value,
       text: c.text,
       svg: toSVG(c.rendered),
-      meta: {
-        set: c.set, grid: c.grid, size: c.size, ecl: c.ecl, strength: c.strength,
-        reliability: c.score.reliability, byDecoder: c.score.byDecoder, minMm: c.score.minMm,
-        match: c.match, printMm: lastPrint.mm, distanceMm: lastPrint.distanceMm, atPrint: c.score.atPrint,
-        style: { shape: c.style.shape, eyes: c.style.eyes, dotScale: c.style.dotScale, maxLum: c.style.maxLum },
-        link: c.link, settings: lastSettings,
-      },
+      meta: metaFor(c),
       image: lastLogo,
     });
     if (replace) setEditing({ id: saved.id, name: saved.name, author: saved.author });
@@ -514,21 +517,27 @@ async function loadForEdit(id) {
   const m = d.meta || {};
   // Fragment-shaped codes encode link#<shaping characters>: edit the link itself.
   $('text').value = m.link || (/^https?:\/\//i.test(d.text) ? d.text.split('#')[0] : d.text);
+  $('saveName').value = d.name;
+  $('saveDetails').value = d.details || '';
+  $('saveAuthor').value = d.author || '';
+  setEditing({ id: d.id, name: d.name, author: d.author || '' });
+  await applyStyleOf(d);
+  generate();
+}
+
+/** Take a saved code's settings and logo (for editing it, or copying its look). */
+async function applyStyleOf(d) {
+  const m = d.meta || {};
   const old = m.style || {};
   applySettings(m.settings || {
     shape: old.shape, eyes: old.eyes, dotScale: old.dotScale && Math.round(old.dotScale * 100),
     contrast: old.maxLum, printMm: m.printMm, distance: m.distanceMm,
   });
-  $('saveName').value = d.name;
-  $('saveDetails').value = d.details || '';
-  $('saveAuthor').value = d.author || '';
-  setEditing({ id: d.id, name: d.name, author: d.author || '' });
   if (d.image) {
     try { setSource(await loadImage(d.image), SQUARE_PX, SQUARE_PX, 'Logo saved with this code'); } catch { /* keep the default */ }
   } else {
     setNote('This code was saved before logos were stored with codes, so the B logo is used. Choose the original image if it was different.');
   }
-  generate();
 }
 
 const params = new URLSearchParams(location.search);
@@ -614,6 +623,164 @@ bindSignIn(() => {
   $('saveMsg').textContent = 'Signed in. Press Save.';
 }, { bar: false });
 if (params.get('edit')) loadForEdit(params.get('edit'));
+
+// ------------------------------------------------------------------ batch mode
+//
+// ?batch=<code>,<code>,…&from=<saved code id>&name=<name>&author=&return=<url>
+// makes and saves one branded code per short link, in the look of saved code
+// `from` (its settings, logo and variant), for projects that keep a pool of
+// links. Runs only when the user presses Start, never on page load. Links that
+// already have a code (of this author) are skipped and reported with it.
+
+const MAX_BATCH = 25;
+const batchCodes = [...new Set((params.get('batch') || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean))];
+const batchValid = batchCodes.length > 0 && batchCodes.length <= MAX_BATCH && batchCodes.every((c) => /^[a-z0-9]{1,9}$/.test(c));
+const batchFrom = params.get('from');
+
+/** One generation run outside the page's results area; resolves to its candidates. */
+function runGeneration(req, only = null) {
+  return new Promise((resolve, reject) => {
+    worker ??= new Worker(new URL('./gen-worker.js', import.meta.url), { type: 'module' });
+    const my = ++jobId;
+    const list = [];
+    worker.onmessage = ({ data: m }) => {
+      if (m.jobId !== my) return;
+      if (m.type === 'candidate') list.push(m.candidate);
+      else if (m.type === 'done') resolve(list);
+      else if (m.type === 'error') reject(new Error(m.message));
+    };
+    worker.onerror = (e) => {
+      worker?.terminate();
+      worker = null;
+      reject(new Error(`Generator failed to start (${e.message || 'module workers unsupported?'}).`));
+    };
+    worker.postMessage({ type: 'generate', jobId: my, ...req, only });
+  });
+}
+
+const phoneSafe = (c) => c.score.reliability >= GOOD && (!lastPrint.mm || rateAtPlan(c) >= 0.85);
+
+/** The best design for one link in the template's look. */
+async function designFor(req, tpl) {
+  lastPrint = req.print;
+  if (tpl.grid) {
+    // First just the template's own variant: quick, and the closest match.
+    const [c] = await runGeneration(req, { set: tpl.set, grid: tpl.grid, ecl: tpl.ecl, strength: tpl.strength });
+    if (c && phoneSafe(c)) return c;
+  }
+  const all = (await runGeneration(req)).filter((c) => c.set === (tpl.set || 'color'));
+  const best = pickRecommended(all);
+  if (!best) throw new Error('No design could be made for this link.');
+  return best;
+}
+
+function batchRow(code) {
+  const li = document.createElement('li');
+  const label = Object.assign(document.createElement('code'), { textContent: code });
+  const state = Object.assign(document.createElement('span'), { className: 'state', textContent: 'Waiting' });
+  li.append(label, state);
+  $('batchList').append(li);
+  return {
+    set(text, kind = '') { state.textContent = text; state.className = `state ${kind}`; },
+    image(url) { if (url) li.prepend(Object.assign(document.createElement('img'), { src: url, alt: `Code for ${code}` })); },
+  };
+}
+
+function batchName(template, code) {
+  if (!template) return code;
+  return template.includes('{code}') ? template.replaceAll('{code}', code) : `${template} · ${code}`;
+}
+
+async function runBatch() {
+  const msg = $('batchMsg');
+  if (!getToken()) {
+    const t = (prompt('Admin or author token (to save the codes):') || '').trim();
+    if (!t) { msg.textContent = 'Sign in with your admin or author token to make the codes.'; return; }
+    setToken(t);
+    applyIdentity();
+  }
+  $('batchStart').disabled = true;
+  $('batchList').replaceChildren();
+  const rows = new Map(batchCodes.map((code) => [code, batchRow(code)]));
+  const results = [];
+  let failed = 0;
+  try {
+    const who = await whoAmI();
+    if (!who) throw new Error('Wrong or missing token. Sign in again with your admin or author token.');
+    let from = null;
+    if (batchFrom) {
+      msg.textContent = `Loading saved code ${batchFrom}…`;
+      from = await api('qr.read', { id: batchFrom });
+      await applyStyleOf(from);
+    }
+    const tpl = from?.meta || {};
+    const author = who.role === 'author' ? who.author : (linkAuthor ?? from?.author ?? '');
+    const nameTemplate = params.get('name') || from?.name || '';
+    lastSettings = readSettings();
+    lastLogo = logoDataUrl();
+    for (const [i, code] of batchCodes.entries()) {
+      const row = rows.get(code);
+      msg.textContent = `Making code ${i + 1} of ${batchCodes.length}…`;
+      try {
+        row.set('Checking the link…');
+        const link = await api('link.read', { code });
+        const { designs } = await api('qr.read', { link: code, limit: 1 });
+        if (designs.length) {
+          results.push([code, designs[0].id]);
+          row.image(designs[0].svg_url);
+          row.set(`Already has a code: "${designs[0].name}" (#${designs[0].id})`, 'ok');
+          continue;
+        }
+        row.set('Generating…');
+        $('text').value = link.short;
+        const c = await designFor(readRequest(), tpl);
+        row.set('Saving…');
+        const saved = await api('qr.create', {
+          ...(author ? { author } : {}),
+          name: batchName(nameTemplate, code),
+          details: from?.details || '',
+          text: c.text,
+          svg: toSVG(c.rendered),
+          meta: metaFor(c),
+          image: lastLogo,
+        });
+        results.push([code, saved.id]);
+        row.image(saved.svg_url);
+        row.set(`Saved "${saved.name}" (#${saved.id}), ${pct(c.score.reliability)} scan rate`, 'ok');
+      } catch (err) {
+        failed++;
+        row.set(err.status === 404 ? 'Not found: not a short link you can use' : err.message, 'bad');
+        if (err.status === 401) throw err;
+      }
+    }
+    msg.textContent = failed ? `Done, but ${failed} of ${batchCodes.length} failed (see below).` : `Done: ${results.length} code${results.length === 1 ? '' : 's'} ready.`;
+  } catch (err) {
+    msg.textContent = err.message;
+  } finally {
+    $('batchStart').disabled = false;
+  }
+  if (returnTo && results.length) {
+    // As with a single save: a button the user presses, never an automatic redirect.
+    const back = new URL(returnTo);
+    back.searchParams.set('qr_ids', results.map(([code, id]) => `${code}:${id}`).join(','));
+    const a = Object.assign(document.createElement('a'), { href: back.href, className: 'btnlink primary', textContent: `Return to ${back.host}`, rel: 'noopener noreferrer' });
+    msg.append(' ', a);
+    a.focus();
+  }
+}
+
+if (params.get('batch')) {
+  $('batchPanel').hidden = false;
+  if (!batchValid) {
+    $('batchIntro').textContent = `The batch link is invalid: it needs 1–${MAX_BATCH} short codes separated by commas, e.g. ?batch=d,e,f.`;
+    $('batchStart').hidden = true;
+  } else {
+    $('batchTitle').textContent = `Make codes for ${batchCodes.length} link${batchCodes.length === 1 ? '' : 's'}`;
+    $('batchIntro').textContent = `Makes and saves a branded code for ${batchCodes.length === 1 ? 'link' : 'each of the links'} ${batchCodes.join(', ')}${batchFrom ? `, in the look of saved code #${batchFrom}` : ' with the settings below'}. Links that already have a code are skipped. It takes a few seconds per link; keep this tab open.`;
+    $('batchStart').textContent = `Make ${batchCodes.length} code${batchCodes.length === 1 ? '' : 's'}`;
+    $('batchStart').addEventListener('click', runBatch);
+  }
+}
 
 // The settings column scrolls on its own (desktop layout); size it to the
 // space actually left in the window so its bottom, with Generate, stays visible.

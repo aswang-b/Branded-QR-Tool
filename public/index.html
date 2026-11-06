@@ -15,6 +15,13 @@
     <p>Your logo, built into the QR pattern itself. Every design is scored with a simulated phone camera before you pick one.</p>
   </header>
 
+  <section class="panel batch" id="batchPanel" hidden aria-label="Make codes for several links">
+    <h2 id="batchTitle">Make codes for several links</h2>
+    <p class="hint" id="batchIntro"></p>
+    <div class="row"><button type="button" class="primary" id="batchStart">Make the codes</button><span id="batchMsg" class="hint"></span></div>
+    <ol class="batch-list" id="batchList"></ol>
+  </section>
+
   <main class="layout">
     <section class="panel controls" aria-label="Settings">
       <p class="edit-banner" id="editBanner" hidden>Editing <strong id="editName"></strong>: generate new designs, then replace it or save one as a new code. <a href="index.html">Stop editing</a></p>

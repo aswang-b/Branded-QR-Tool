@@ -84,13 +84,17 @@ export async function scoreCandidate({ link, v, plan, set, style, decoders, prin
  * Generate every candidate, calling onCandidate as each finishes.
  * Plans are shared between the colour and black & white sets.
  */
-export async function generateAll({ link, image, opts = {}, style = {}, print = {}, decoders, trials = 3, onCandidate, onStart }) {
-  const vs = variants(link, opts);
+export async function generateAll({ link, image, opts = {}, style = {}, print = {}, decoders, trials = 3, only = null, onCandidate, onStart }) {
+  let vs = variants(link, opts);
   if (!vs.length) throw new Error('That link is too long for a QR code.');
+  // only: {set?, grid?, ecl? ("Q"|"H"), strength?} makes just the matching
+  // variant(s), e.g. to copy a saved code's look onto another link (batch mode).
+  if (only) vs = vs.filter((v) => (only.grid == null || v.grid === only.grid) && (only.ecl == null || 'LMQH'[v.ecl] === only.ecl) && (only.strength == null || v.strength === only.strength));
+  const sets = only?.set ? SETS.filter((s) => s.set === only.set) : SETS;
   const plans = vs.map((v) => ({ v, plan: planVariant(link, v, image, opts) }));
-  onStart?.(plans.length * SETS.length);
+  onStart?.(plans.length * sets.length);
   const out = [];
-  for (const { set, overrides } of SETS) {
+  for (const { set, overrides } of sets) {
     for (const [i, { v, plan }] of plans.entries()) {
       const c = await scoreCandidate({ link, v, plan, set, style: { ...style, ...overrides }, decoders, print, trials, seed: 1000 + i });
       c.id = `${set}-${i}`;

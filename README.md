@@ -196,6 +196,14 @@ that was already generated). Other projects use them through the API with their 
   generator fills those in (saying the author came from the link), and after Save shows a
   "Return to <host>" button that goes back to `return` with `?qr_id=<id>`
   added (https only, or a localhost dev server).
+- **Make codes for many links at once (batch):** open
+  `https://qr.dancewithb.fun/?batch=d,e,f&from=<saved code id>&name=Door%20sign%20{code}&return=<https url>`.
+  After the admin presses **Make N codes**, it makes and saves one code per short link (up to 25) in
+  the look of saved code `from` (its settings, logo and variant; if that variant doesn't scan well on
+  a link, the best phone-safe one in the same set), named from `name` (`{code}` is replaced). Links
+  that already have a code are skipped and reported with it. Afterwards a **Return** button goes to
+  `return?qr_ids=d:12,e:13,f:14` (short code : saved code id). Links must belong to the signed-in
+  author (any link, for the admin). Nothing runs until the button is pressed.
 - **Show the author's codes:** `qr.read {}` lists them, `qr.read {link: "c"}` just those for one
   short link. Every code has a `svg_url` (`/q/<id>.svg?sig=…`), a signed image link an `<img>` can
   load with no token: unguessable, and revoked by rotating the author's token (or the admin token).

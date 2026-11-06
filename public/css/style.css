@@ -205,3 +205,13 @@ input[type="number"], input[type="password"] {
 .api-toc { line-height: 1.9; }
 .code-block { margin: 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
   font-size: .8rem; overflow-x: auto; white-space: pre; }
+
+/* Batch mode (?batch=…): one row per link */
+.batch { max-width: 1200px; margin: 0 auto 16px; }
+.batch h2 { margin-top: 0; }
+.batch-list { margin: 12px 0 0; padding-left: 1.4em; display: grid; gap: 8px; }
+.batch-list li { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.batch-list img { width: 56px; height: 56px; border-radius: 6px; background: #fff; }
+.batch-list .state { color: var(--muted); }
+.batch-list .state.ok { color: var(--ok); }
+.batch-list .state.bad { color: var(--bad); }

@@ -166,3 +166,12 @@ test('generateAll: 16 scored candidates, colour and black & white', async () => 
   // most candidates should be phone-safe; the generator only offers robust levels
   assert.ok(all.filter((c) => c.score.reliability >= 0.75).length >= 12);
 });
+
+test('generateAll with only: just the variant a saved code used (batch mode copies a look)', async () => {
+  const base = { link: LINK, ...LOGO, opts: { threshold: 0.65, deadzone: 0.1 }, style: { shape: 'dots' }, decoders: await decoders(), trials: 1 };
+  const one = await generateAll({ ...base, only: { set: 'color', grid: 'Compact', ecl: 'H', strength: 0.6 } });
+  assert.equal(one.length, 1);
+  assert.deepEqual([one[0].set, one[0].grid, one[0].ecl, one[0].strength], ['color', 'Compact', 'H', 0.6]);
+  // a variant this link doesn't have yields nothing (the caller then makes them all)
+  assert.equal((await generateAll({ ...base, only: { grid: 'Nope' } })).length, 0);
+});
