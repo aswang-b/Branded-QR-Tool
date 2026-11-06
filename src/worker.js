@@ -37,13 +37,15 @@
 //   spec.read    {} -> this API's specification (see spec.js); authors
 //                get the part their token can use                  admin, author
 //   ticket.create {links, from?, name?, parent, author?} -> {url, …} admin, author
-//                a 10-minute embed ticket (see below)
-//   ticket.read   {} -> what the calling ticket allows               ticket
+//                an embed ticket: 10 minutes after last use, 1 hour at most
+//   ticket.read   {} -> what the calling ticket allows (400 without one)  ticket
 //
 // Embedding (GET /embed#t=<ticket>): the generator page, framed by a site in
 // EMBED_PARENTS, makes and saves one code per ticket link and posts the
 // results to the parent window. A ticket ("qrt_…") acts as its author but may
-// only read its links and template code and save one code per link.
+// only read its links and template code and save one code per link, named
+// and described by the ticket and template. Rotating, renaming or deleting the
+// author deletes their tickets.
 //
 // Everything else is served from the static assets (see wrangler.jsonc: the
 // Worker only runs for /c/* and /api/*, so the site itself stays free of
@@ -83,7 +85,8 @@ const MAX_IMAGE_LENGTH = 300_000; // source logo, as a PNG data URL
 const MAX_AUTHOR_LENGTH = 200;
 const MAX_KEY_LENGTH = 100;
 const MAX_STATS_DAYS = 400;
-const TICKET_TTL = 600; // seconds an embed ticket lasts
+const TICKET_TTL = 600; // seconds an embed ticket lasts after it was made or last used
+const TICKET_MAX_LIFE = 3600; // and never longer than this after it was made
 const MAX_TICKET_LINKS = 25;
 // Scans are counted per 15 minutes: every time zone's offset is a whole number
 // of quarter hours (India +5:30, Nepal +5:45), so days split exactly anywhere.
@@ -168,10 +171,22 @@ async function authorize(request, env, ctx) {
   if (given.startsWith('qrt_')) {
     // An embed ticket: acts as its author, limited by api() to what it covers.
     await ensureSchema(env.DB);
-    const t = await env.DB.prepare('SELECT author, links, from_id, name, parent, expires_at FROM tickets WHERE token_hash = ? AND expires_at > ?')
-      .bind(await sha256Hex(given), Math.floor(Date.now() / 1000)).first();
+    const hash = await sha256Hex(given);
+    const t = await env.DB.prepare('SELECT author, links, from_id, name, parent, created_at, expires_at FROM tickets WHERE token_hash = ? AND expires_at > ?')
+      .bind(hash, Math.floor(Date.now() / 1000)).first();
     if (!t) return unauthorized();
-    return { role: 'author', author: t.author, ticket: { links: JSON.parse(t.links), from: t.from_id, name: t.name, parent: t.parent, expires_at: t.expires_at } };
+    // Sliding expiry: a ticket in use stays alive TICKET_TTL past its last use
+    // (a slow batch, or a page opened a few minutes late), up to
+    // TICKET_MAX_LIFE after it was made. Written at most once a minute.
+    const now = Math.floor(Date.now() / 1000);
+    const expires = Math.min(now + TICKET_TTL, t.created_at + TICKET_MAX_LIFE);
+    if (expires - t.expires_at >= 60) {
+      ctx?.waitUntil(
+        env.DB.prepare('UPDATE tickets SET expires_at = ? WHERE token_hash = ?').bind(expires, hash).run()
+          .catch((e) => console.error('ticket refresh failed', e)),
+      );
+    }
+    return { role: 'author', author: t.author, ticket: { links: JSON.parse(t.links), from: t.from_id, name: t.name, parent: t.parent, expires_at: Math.max(expires, t.expires_at) } };
   }
   if (!given.startsWith('qra_')) return unauthorized();
   await ensureSchema(env.DB);
@@ -402,6 +417,10 @@ function ensureSchema(db) {
            expires_at INTEGER NOT NULL
          )`,
       ),
+      // ticket.create prunes expired tickets; an index keeps that from scanning the table.
+      db.prepare('CREATE INDEX IF NOT EXISTS tickets_expires ON tickets (expires_at)'),
+      // Revoking an author (author.update / author.delete) drops their tickets.
+      db.prepare('CREATE INDEX IF NOT EXISTS tickets_author ON tickets (author)'),
     ]))
     .catch((e) => {
       schemaReady = null;
@@ -608,7 +627,9 @@ const authorUpdate = async ({ env, p }) => {
       throw new HttpError(409, `"${name}" and "${newName}" both have links with the key(s) ${clash.map((r) => `"${r.client_key}"`).join(', ')}. Change or delete one link of each pair first.`);
     }
   }
-  const stmts = [];
+  // A rotated or renamed author's live embed tickets stop working too, like
+  // their old token and image links.
+  const stmts = [env.DB.prepare('DELETE FROM tickets WHERE author = ?').bind(name)];
   if (p.rotate_token) {
     const token = newAuthorToken();
     stmts.push(env.DB.prepare('UPDATE authors SET token = ?, token_hash = ?, last_used = NULL WHERE name = ?').bind(token, await sha256Hex(token), name));
@@ -631,8 +652,11 @@ const authorUpdate = async ({ env, p }) => {
 
 const authorDelete = async ({ env, p }) => {
   const name = parseAuthorName(p.name);
-  const res = await env.DB.prepare('DELETE FROM authors WHERE name = ?').bind(name).run();
-  // Their saved codes stay (still labelled with the name); only the token stops working.
+  const [res] = await env.DB.batch([
+    env.DB.prepare('DELETE FROM authors WHERE name = ?').bind(name),
+    env.DB.prepare('DELETE FROM tickets WHERE author = ?').bind(name),
+  ]);
+  // Their saved codes stay (still labelled with the name); the token and its tickets stop working.
   return res.meta?.changes ? json({ deleted: name }) : json({ error: 'Not found' }, 404);
 };
 
@@ -844,15 +868,28 @@ const SVG_HEADERS = {
 
 const qrCreate = async ({ req, env, base, p, who }) => {
   const text = parseText(p.text, 'text', MAX_TEXT_LENGTH);
-  const { id } = await env.DB.prepare('INSERT INTO designs (name, details, author, text, link_id, svg, meta, image, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id')
-    .bind(
-      parseText(p.name, 'name', MAX_NAME_LENGTH),
-      parseText(p.details, 'details', MAX_DETAILS_LENGTH, { required: false }),
-      ownerFor(p, who),
-      text, await designLinkId(env, text, req, who), parseSvg(p.svg), parseMeta(p.meta), parseImage(p.image), Math.floor(Date.now() / 1000),
-    )
-    .first();
-  return json(await designOut(env, base, await fetchDesign(env.DB, id, null), { who }), 201);
+  const author = ownerFor(p, who);
+  const linkId = await designLinkId(env, text, req, who);
+  // With a ticket, the name, details and logo come from the ticket and its
+  // template (see ticketFields), not from the browser.
+  const fixed = who.ticket ? await ticketFields(env, who, linkId) : {};
+  const values = [
+    fixed.name ?? parseText(p.name, 'name', MAX_NAME_LENGTH),
+    fixed.details ?? parseText(p.details, 'details', MAX_DETAILS_LENGTH, { required: false }),
+    author, text, linkId, parseSvg(p.svg), parseMeta(p.meta),
+    fixed.image !== undefined ? fixed.image : parseImage(p.image),
+    Math.floor(Date.now() / 1000),
+  ];
+  const cols = 'name, details, author, text, link_id, svg, meta, image, created_at';
+  const marks = values.map(() => '?').join(', ');
+  // A ticket saves one code per link: checked in the INSERT itself, so two
+  // saves at once can't both get in.
+  const row = who.ticket
+    ? await env.DB.prepare(`INSERT INTO designs (${cols}) SELECT ${marks} WHERE NOT EXISTS (SELECT 1 FROM designs WHERE link_id = ? AND author = ?) RETURNING id`)
+      .bind(...values, linkId, author).first()
+    : await env.DB.prepare(`INSERT INTO designs (${cols}) VALUES (${marks}) RETURNING id`).bind(...values).first();
+  if (!row) throw await ticketConflict(env, linkId, author);
+  return json(await designOut(env, base, await fetchDesign(env.DB, row.id, null), { who }), 201);
 };
 
 const qrRead = async ({ env, base, p, who }) => {
@@ -924,14 +961,16 @@ const embedParents = (env) => (env.EMBED_PARENTS || '').split(/\s+/).filter(Bool
 
 const ticketCreate = async ({ env, base, p, who }) => {
   // The ticket acts as one author: the caller's own, or (admin) the one named.
-  const author = who.role === 'author' ? authorScope(p, who) : parseText(p.author ?? '', 'author', MAX_AUTHOR_LENGTH, { required: false });
-  const raw = typeof p.links === 'string' ? p.links.split(',') : p.links;
+  const author = ownerFor(p, who);
+  // "d,e," and "d, e" are fine, as with ?batch= on the page.
+  const raw = typeof p.links === 'string' ? p.links.split(',').filter((c) => c.trim()) : p.links;
   if (!Array.isArray(raw)) throw new HttpError(400, '"links" must be a list of short codes, e.g. ["d", "e"]');
   const codes = [...new Set(raw.map((c) => (typeof c === 'string' ? c.trim().toLowerCase() : '')))];
   if (!codes.length || codes.length > MAX_TICKET_LINKS || codes.some((c) => decodeCode(c) === null))
     throw new HttpError(400, `"links" must be 1-${MAX_TICKET_LINKS} short codes, e.g. ["d", "e"]`);
   const ids = codes.map(decodeCode);
-  const { results } = await env.DB.prepare(`SELECT id FROM links WHERE author = ? AND id IN (${ids.map(() => '?').join(', ')})`).bind(author, ...ids).all();
+  const [scope, scopeArgs] = authorWhere(author);
+  const { results } = await env.DB.prepare(`SELECT id FROM links WHERE id IN (${ids.map(() => '?').join(', ')})${scope}`).bind(...ids, ...scopeArgs).all();
   const found = new Set(results.map((r) => r.id));
   const missing = codes.filter((c) => !found.has(decodeCode(c)));
   if (missing.length) throw new HttpError(404, `Not found (or not ${author ? `"${author}"` : 'unowned'}'s): ${missing.join(', ')}`);
@@ -955,11 +994,40 @@ const ticketCreate = async ({ env, base, p, who }) => {
   return json({ url: `${base}/embed#t=${token}`, links: codes, from: fromId, name, parent, author, expires_at: now + TICKET_TTL }, 201);
 };
 
+// Open to every role so that the one check below answers anyone without a ticket.
 const ticketRead = async ({ who }) => {
   if (!who.ticket) throw new HttpError(400, 'ticket.read is called with a ticket ("qrt_…") as the token');
   const t = who.ticket;
   return json({ author: who.author, links: t.links, from: t.from, name: t.name, parent: t.parent, expires_at: t.expires_at });
 };
+
+/** The name a batch gives a link's code: the template with {code} filled in, or "<template> · <code>". */
+export function batchName(template, code) {
+  const name = !template ? code : template.includes('{code}') ? template.replaceAll('{code}', code) : `${template} · ${code}`;
+  return name.slice(0, MAX_NAME_LENGTH);
+}
+
+/**
+ * What a ticket's qr.create saves regardless of what the browser sent: the
+ * name from the ticket's template, and with a `from` code, its details and logo.
+ * (The SVG itself can't be checked here: the Worker can't decode a QR code
+ * within its CPU limit. The ticket limits which links get a code, and how many.)
+ */
+async function ticketFields(env, who, linkId) {
+  const t = who.ticket;
+  const from = t.from ? await env.DB.prepare('SELECT name, details, image FROM designs WHERE id = ? AND author = ?').bind(t.from, who.author).first() : null;
+  return {
+    name: batchName(t.name || from?.name || '', encodeId(linkId)),
+    details: from ? from.details : '',
+    ...(from ? { image: from.image ?? null } : {}),
+  };
+}
+
+/** The 409 for a ticket saving a second code for a link. */
+async function ticketConflict(env, linkId, author) {
+  const existing = await env.DB.prepare('SELECT id FROM designs WHERE link_id = ? AND author = ? LIMIT 1').bind(linkId, author).first();
+  return new HttpError(409, `Link ${encodeId(linkId)} already has a code${existing ? ` (#${existing.id})` : ''}`);
+}
 
 const TICKET_METHODS = new Set(['ticket.read', 'spec.read', 'link.read', 'qr.read', 'qr.create']);
 
@@ -974,8 +1042,8 @@ async function checkTicket(name, p, who, req, env) {
   if (name === 'qr.create') {
     const id = typeof p.text === 'string' ? linkIdFor(p.text.trim(), req, env) : null;
     if (id === null || !t.links.includes(encodeId(id))) deny();
-    const existing = await env.DB.prepare('SELECT id FROM designs WHERE link_id = ? AND author = ? LIMIT 1').bind(id, who.author).first();
-    if (existing) throw new HttpError(409, `Link ${encodeId(id)} already has a code (#${existing.id})`);
+    // Early, friendly answer; qrCreate's INSERT enforces it for simultaneous saves.
+    if (await env.DB.prepare('SELECT 1 FROM designs WHERE link_id = ? AND author = ? LIMIT 1').bind(id, who.author).first()) throw await ticketConflict(env, id, who.author);
   }
 }
 
@@ -1010,7 +1078,7 @@ const METHODS = {
   'author.update': { roles: ['admin'], run: authorUpdate },
   'author.delete': { roles: ['admin'], run: authorDelete },
   'ticket.create': { roles: ['admin', 'author'], run: ticketCreate },
-  'ticket.read': { roles: ['author'], read: true, run: ticketRead },
+  'ticket.read': { roles: ['admin', 'author'], read: true, run: ticketRead },
   'spec.read': { roles: ['admin', 'author'], read: true, run: ({ base, who }) => json(buildSpec(METHODS, base, who)) },
 };
 
@@ -1028,7 +1096,6 @@ async function api(request, env, url, ctx) {
     : await readJson(request, method.big ? MAX_DESIGN_BODY_BYTES : MAX_BODY_BYTES);
   await ensureSchema(env.DB);
   if (who.ticket) await checkTicket(name, p, who, request, env);
-  else if (name === 'ticket.read') throw new HttpError(400, 'ticket.read is called with a ticket ("qrt_…") as the token');
   return method.run({ req: request, env, url, base: publicBase(request, env), p, who });
 }
 
@@ -1042,7 +1109,10 @@ export default {
       const image = /^\/q\/([0-9]+)\.svg$/.exec(url.pathname);
       if (image) return await signedImage(request, env, image[1], url);
       if (url.pathname.startsWith('/q/')) return notFound();
-      if (url.pathname === '/embed' || url.pathname === '/embed/') return await embedPage(request, env);
+      // index.html loads css/ and js/ by relative path, which only resolves from
+      // /embed, so /embed/ is sent there (the browser keeps the #t= fragment).
+      if (url.pathname === '/embed/') return new Response(null, { status: 308, headers: { Location: `/embed${url.search}`, 'Cache-Control': 'no-store' } });
+      if (url.pathname === '/embed') return await embedPage(request, env);
       if (url.pathname.startsWith('/api/')) return await api(request, env, url, ctx);
       return env.ASSETS ? env.ASSETS.fetch(request) : notFound();
     } catch (e) {

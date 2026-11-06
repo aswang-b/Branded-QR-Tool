@@ -796,14 +796,60 @@ test('ticket.create: an embed ticket covering only its links, template and one c
   }
   await expectStatus(await rpc('qr.create', { name: 'x', text: `${w.base}/c/${other.code}`, svg: SVG }, T), 403);
   await expectStatus(await rpc('qr.create', { name: 'x', text: 'not a link', svg: SVG }, T), 403);
-  // one code per link
-  const saved = await rpc('qr.create', { name: 'Door sign', text: `${l1.short}#abc`, svg: SVG }, T);
+  // one code per link; the name and details come from the ticket and template, not the browser
+  const saved = await rpc('qr.create', { name: 'Anything I like', details: 'forged', text: `${l1.short}#abc`, svg: SVG }, T);
   assert.equal(saved.status, 201);
-  assert.equal((await saved.json()).author, 'embed-user');
+  const savedBody = await saved.json();
+  assert.equal(savedBody.author, 'embed-user');
+  assert.equal(savedBody.name, `Door sign ${l1.code}`);
+  assert.equal(savedBody.details, '');
   await expectStatus(await rpc('qr.create', { name: 'Again', text: l1.short, svg: SVG }, T), 409);
-  // a ticket isn't an author token, and ticket.read needs one
+  // two saves at once for the same link: exactly one gets in
+  const both = await Promise.all([1, 2].map(() => rpc('qr.create', { name: 'x', text: l2.short, svg: SVG }, T)));
+  assert.deepEqual(both.map((r) => r.status).sort(), [201, 409]);
+  await Promise.all(both.map((r) => r.arrayBuffer()));
+  assert.equal((await (await rpc('qr.read', { link: l2.code }, k)).json()).designs.length, 1);
+  // a ticket isn't an author token, and ticket.read needs one (admin too: 400, not 403)
   await expectStatus(await rpc('ticket.read', {}, k), 400);
+  await expectStatus(await rpc('ticket.read', {}), 400);
   await expectStatus(await rpc('ticket.read', {}, { Authorization: 'Bearer qrt_' + 'A'.repeat(43) }), 401);
+});
+
+test('ticket.create: trailing commas are fine; rotating or deleting the author revokes tickets', async () => {
+  const k = await authorKey('ticket-revoke');
+  const l = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in?sign=r' }, k)).json();
+  const ticket = async () => {
+    const r = await rpc('ticket.create', { links: `${l.code}, ,`, parent: 'https://dancewithb.fun' }, k);
+    assert.equal(r.status, 201);
+    const made = await r.json();
+    assert.deepEqual(made.links, [l.code]);
+    return { Authorization: `Bearer ${new URL(made.url).hash.slice(3)}` };
+  };
+  const T1 = await ticket();
+  await expectStatus(await rpc('ticket.read', {}, T1), 200);
+  // rotating the token (or renaming) kills live tickets
+  const rotated = await (await rpc('author.update', { name: 'ticket-revoke', rotate_token: true })).json();
+  await expectStatus(await rpc('ticket.read', {}, T1), 401);
+  const k2 = { Authorization: `Bearer ${rotated.token}` };
+  const r = await rpc('ticket.create', { links: [l.code], parent: 'https://dancewithb.fun' }, k2);
+  const T2 = { Authorization: `Bearer ${new URL((await r.json()).url).hash.slice(3)}` };
+  await expectStatus(await rpc('ticket.read', {}, T2), 200);
+  // ...and so does deleting the author
+  await expectStatus(await rpc('author.delete', { name: 'ticket-revoke' }), 200);
+  await expectStatus(await rpc('ticket.read', {}, T2), 401);
+});
+
+test('a ticket with a template saves the template\'s details and logo', async () => {
+  const k = await authorKey('ticket-template');
+  const l = await (await rpc('link.create', { url: 'https://dancewithb.fun/check-in?sign=t' }, k)).json();
+  const logo = 'data:image/png;base64,iVBORw0KGgo=';
+  const tpl = await (await rpc('qr.create', { name: 'Door sign', details: 'Front door, 40 mm', text: 'x', svg: SVG, image: logo }, k)).json();
+  const made = await (await rpc('ticket.create', { links: [l.code], from: tpl.id, parent: 'https://dancewithb.fun' }, k)).json();
+  const T = { Authorization: `Bearer ${new URL(made.url).hash.slice(3)}` };
+  const saved = await (await rpc('qr.create', { name: 'x', details: 'forged', text: l.short, svg: SVG, image: 'data:image/png;base64,AAAA' }, T)).json();
+  assert.equal(saved.name, `Door sign · ${l.code}`); // no name on the ticket: the template's name
+  assert.equal(saved.details, 'Front door, 40 mm');
+  assert.equal((await (await rpc('qr.read', { id: saved.id }, k)).json()).image, logo);
 });
 
 test('/embed: the generator page, frameable only by EMBED_PARENTS', async () => {
@@ -818,4 +864,8 @@ test('/embed: the generator page, frameable only by EMBED_PARENTS', async () => 
   assert.equal(home.headers.get('content-security-policy'), null);
   assert.equal(home.headers.get('x-frame-options'), 'SAMEORIGIN'); // the rest of the site still refuses framing
   await home.arrayBuffer();
+  // /embed/ would load css/ and js/ from /embed/…, which don't exist: it goes to /embed
+  const slash = await call('/embed/?x=1', { redirect: 'manual' });
+  assert.equal(slash.status, 308);
+  assert.equal(slash.headers.get('location'), '/embed?x=1');
 });

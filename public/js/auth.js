@@ -10,23 +10,30 @@ const KEY = 'adminToken';
 const NAME_KEY = 'signedInAs';
 export const store = (area) => { try { return window[area]; } catch { return null; } };
 
-// A token held only in memory (the /embed page's ticket): never stored, and
-// it works where an iframe has no storage (Safari blocks it for third parties).
-let memoryToken = null;
-export const useMemoryToken = (token) => { memoryToken = token || null; };
+// Memory-only mode (the /embed page and its ticket): the token and name live
+// in these variables and storage is never read or written. The iframe shares
+// storage with the main site (dancewithb.fun and qr.dancewithb.fun are one
+// site), so it must not fall back to, overwrite or clear the user's own
+// sign-in. It also works where an iframe has no storage at all (Safari).
+let memoryMode = false;
+let memoryToken = '';
+let memoryName = '';
+export const useMemoryToken = (token) => { memoryMode = true; memoryToken = token || ''; memoryName = ''; };
 
-export const getToken = () => memoryToken || store('sessionStorage')?.getItem(KEY) || store('localStorage')?.getItem(KEY) || '';
-export const isRemembered = () => !!store('localStorage')?.getItem(KEY);
+export const getToken = () => (memoryMode ? memoryToken : store('sessionStorage')?.getItem(KEY) || store('localStorage')?.getItem(KEY) || '');
+export const isRemembered = () => !memoryMode && !!store('localStorage')?.getItem(KEY);
 
 /** Who signed in ("admin" or an author name), or '' if not known yet. */
-export const getName = () => store('sessionStorage')?.getItem(NAME_KEY) || store('localStorage')?.getItem(NAME_KEY) || '';
+export const getName = () => (memoryMode ? memoryName : store('sessionStorage')?.getItem(NAME_KEY) || store('localStorage')?.getItem(NAME_KEY) || '');
 
 const setName = (name) => {
+  if (memoryMode) { memoryName = name; return; }
   for (const area of ['sessionStorage', 'localStorage']) if (store(area)?.getItem(KEY)) store(area).setItem(NAME_KEY, name);
 };
 
 /** Use this token from now on (and keep remembering it if a token was remembered). */
 export function setToken(token, remember = isRemembered(), name = '') {
+  if (memoryMode) { memoryToken = token; memoryName = name; return; }
   for (const [area, keep] of [['sessionStorage', true], ['localStorage', remember]]) {
     store(area)?.removeItem(NAME_KEY);
     if (keep) { store(area)?.setItem(KEY, token); if (name) store(area)?.setItem(NAME_KEY, name); }
@@ -53,7 +60,11 @@ export function whoAmI() {
 }
 
 export function clearToken() {
-  memoryToken = null;
+  if (memoryMode) {
+    memoryToken = memoryName = '';
+    window.dispatchEvent(new Event('auth-change'));
+    return;
+  }
   for (const area of ['sessionStorage', 'localStorage']) {
     store(area)?.removeItem(KEY);
     store(area)?.removeItem(NAME_KEY);

@@ -150,8 +150,8 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 | `author.read` | `include_tokens?` | `{authors: […]}` (tokens only when asked) | admin |
 | `author.update` | `name`, `new_name?`, `rotate_token?`, `adopt_existing?` | the author | admin |
 | `author.delete` | `name` | `{deleted}` | admin |
-| `ticket.create` | `links`, `parent`, `from?`, `name?`, `author?` (admin) | `{url, …}`: a 10-minute `/embed` ticket (201) | admin, author |
-| `ticket.read` | | what the calling ticket covers (used by `/embed`) | ticket |
+| `ticket.create` | `links`, `parent`, `from?`, `name?`, `author?` (admin) | `{url, …}`: a short-lived `/embed` ticket (201) | admin, author |
+| `ticket.read` | | what the calling ticket covers (used by `/embed`; 400 without a ticket) | ticket |
 | `spec.read` | | the specification (for an author: what their token can call) | admin, author |
 
 **Tokens.** `ADMIN_TOKEN` is a Wrangler secret and can do everything. **Author tokens** (`qra_…`) are
@@ -203,8 +203,11 @@ that was already generated). Other projects use them through the API with their 
   and puts the returned `url` (`…/embed#t=qrt_…`) in an `<iframe>` on `parent`. The page starts at
   once (no settings, no sign-in), makes and saves one code per link like batch mode below, and posts
   `{type: "qr-ready" | "qr-progress" | "qr-done" | "qr-error" | "qr-resize", …}` to the parent; check
-  `event.origin === "https://qr.dancewithb.fun"`. The ticket lasts 10 minutes and can only read its
-  links and the `from` code and save one code per link. Only origins in `EMBED_PARENTS`
+  `event.origin === "https://qr.dancewithb.fun"`; `qr-error` includes the results so far. The ticket
+  lasts 10 minutes after it was made or last used (at most an hour), and rotating, renaming or deleting
+  its author revokes it. It can only read its links and the `from` code and save one code per link, and
+  the saved name, details and logo come from the ticket and `from`, not the browser. The embed page
+  never reads or changes the sign-in stored for the main site. Only origins in `EMBED_PARENTS`
   (`wrangler.jsonc`) may frame `/embed` or be a ticket's `parent`.
 - **Make codes for many links at once (batch):** open
   `https://qr.dancewithb.fun/?batch=d,e,f&from=<saved code id>&name=Door%20sign%20{code}&return=<https url>`.

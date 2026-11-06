@@ -39,6 +39,29 @@ Static pages never reach it (see `run_worker_first` in `wrangler.jsonc`).
   - `designLinkId(env, text, req, who)`: the `link_id` for a design. For authors, only their own links.
   - `presentDesign(..., {who})`: nulls `link.url` when the viewer is an author who doesn't own the link.
 
+## Embed tickets (`ticket.*`, `/embed`)
+
+- `ticket.create` (admin or author, called from the other project's *server*) stores a ticket by
+  hash: author (via `ownerFor`), links (each must be the author's, checked with `authorWhere`), an
+  optional `from` design, a name template, and `parent` (must be in `EMBED_PARENTS`). It returns
+  `…/embed#t=qrt_…`.
+- `authorize()` turns a live `qrt_` token into `{role:'author', author, ticket}`.
+  - Expiry slides: `expires_at` moves to `now + TICKET_TTL`, capped at `created_at + TICKET_MAX_LIFE`,
+    and is written at most once a minute.
+- `api()` calls `checkTicket()` before the handler:
+  - Only `ticket.read`, `spec.read`, `link.read {code}`, `qr.read {link}` / `{id: from}` and
+    `qr.create` for a covered link.
+  - A link that already has a code → 409.
+- `qrCreate` with a ticket:
+  - Name, details and logo come from `ticketFields()` (`batchName(template, code)`, the `from`
+    code's details and image).
+  - The INSERT is conditional (`… SELECT … WHERE NOT EXISTS`), so simultaneous saves can't
+    duplicate a code.
+- `authorUpdate` / `authorDelete` delete the author's tickets (rotate, rename, revoke).
+- `/embed` serves `index.html` with `frame-ancestors <EMBED_PARENTS>`, no `X-Frame-Options`, and
+  `no-store`. `/embed/` gets a 308 to `/embed`, because the page's asset paths are relative.
+- `ticket.read` is open to every role, and answers 400 to anyone without a ticket.
+
 ## Adding or changing an API method
 
 1. Write the handler `async ({ req, env, base, p, who }) => Response`. Validate every field with a

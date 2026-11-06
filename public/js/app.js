@@ -540,12 +540,14 @@ async function applyStyleOf(d) {
   }
 }
 
-// /embed#t=<ticket>: sign in with the ticket, held in memory only, and drop it
-// from the address bar.
+// /embed#t=<ticket>: sign in with the ticket, held in memory only (auth.js never
+// touches the user's stored sign-in in this mode). The fragment stays in the
+// frame's URL so a reload still has the ticket; a fragment is never sent to a
+// server or in a Referer.
 const EMBEDDED = /^\/embed\/?$/.test(location.pathname);
+const embedTicket = EMBEDDED ? (new URLSearchParams(location.hash.slice(1)).get('t') || '').trim() : '';
 if (EMBEDDED) {
-  useMemoryToken(new URLSearchParams(location.hash.slice(1)).get('t') || '');
-  history.replaceState(null, '', location.pathname);
+  useMemoryToken(embedTicket);
   // A parent that reuses its iframe for a new ticket only changes the
   // fragment, which doesn't reload the page: start over with the new ticket.
   addEventListener('hashchange', () => location.reload());
@@ -706,6 +708,8 @@ function batchName(template, code) {
  * Make and save one code per link in the look of saved code `from`.
  * cfg: {codes, from?, nameTemplate?, author?, report?(result)}; each result is
  * {link, status: "saved"|"existing"|"failed", id?, name?, svg_url?, reliability?, error?}.
+ * If it has to stop early (e.g. the token stops working), it throws an error
+ * whose `results` holds what was done before, so saved codes aren't lost.
  */
 async function runBatch(cfg) {
   const msg = $('batchMsg');
@@ -771,7 +775,9 @@ async function runBatch(cfg) {
       ? `Done, but ${failed} of ${cfg.codes.length} failed (see below).`
       : `Done: ${results.length} code${results.length === 1 ? '' : 's'} ready.`;
   } catch (err) {
-    msg.textContent = err.message;
+    const saved = results.filter((r) => r.id).length;
+    msg.textContent = saved ? `${err.message} Stopped after ${saved} code${saved === 1 ? '' : 's'}; those are saved.` : err.message;
+    err.results = results;
     throw err;
   } finally {
     $('batchStart').disabled = false;
@@ -790,7 +796,9 @@ async function startPageBatch() {
   let results = [];
   try {
     results = await runBatch({ codes: batchCodes, from: batchFrom, nameTemplate: params.get('name'), author: linkAuthor });
-  } catch { return; /* shown in the message */ }
+  } catch (err) {
+    results = err.results || []; // the error is shown; still offer the codes made before it
+  }
   const ok = results.filter((r) => r.id);
   if (returnTo && ok.length) {
     // As with a single save: a button the user presses, never an automatic redirect.
@@ -838,15 +846,20 @@ async function startEmbed() {
     if (parentOrigin && height !== lastHeight) { lastHeight = height; post({ type: 'qr-resize', height }); }
   };
   new ResizeObserver(sendSize).observe(document.body);
+  const EXPIRED = 'This link has expired (it lasts 10 minutes after its last use). Close it and start again.';
+  const fail = (text) => {
+    $('batchTitle').textContent = 'Can\'t make the codes';
+    $('batchMsg').textContent = text;
+    // Nothing secret in it, and the parent isn't known without a ticket.
+    if (window.parent !== window) window.parent.postMessage({ type: 'qr-error', error: text }, '*');
+  };
+  // Without a ticket there is nothing to act as: never fall back to a stored sign-in.
+  if (!embedTicket) return fail('This page needs a link with a ticket (…/embed#t=qrt_…) from ticket.create.');
   let ticket;
   try {
     ticket = await api('ticket.read');
   } catch (err) {
-    $('batchTitle').textContent = 'Can\'t make the codes';
-    $('batchMsg').textContent = err.status === 401 ? 'This link has expired (they last 10 minutes). Close it and start again.' : err.message;
-    // Nothing secret in it, and the parent isn't known without a ticket.
-    if (window.parent !== window) window.parent.postMessage({ type: 'qr-error', error: $('batchMsg').textContent }, '*');
-    return;
+    return fail(err.status === 401 ? EXPIRED : err.message);
   }
   parentOrigin = ticket.parent;
   post({ type: 'qr-ready', links: ticket.links, expires_at: ticket.expires_at });
@@ -861,7 +874,10 @@ async function startEmbed() {
     post({ type: 'qr-done', results });
     requestAnimationFrame(sendSize);
   } catch (err) {
-    post({ type: 'qr-error', error: err.message });
+    const error = err.status === 401 ? EXPIRED : err.message;
+    if (err.status === 401) $('batchMsg').textContent = error;
+    // Codes saved before the error are in results, so the parent can keep them.
+    post({ type: 'qr-error', error, results: err.results || [] });
   }
 }
 

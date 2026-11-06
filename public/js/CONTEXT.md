@@ -46,6 +46,25 @@ ignored, and a new job supersedes the running one.
   any other author.
 - Replace sends `new_author` only when the author changed. Author tokens may not send it at all.
 
+## Batch mode and embed (bottom of app.js)
+
+- `?batch=d,e,f&from=<id>&name=…&return=…`: a panel with "Make N codes", which runs only on a click.
+  `runBatch()` does, per link:
+  1. `link.read`.
+  2. `qr.read {link}`, skipping links that already have a code.
+  3. `designFor()`: the template's own variant first, then a full run.
+  4. `qr.create`.
+- On a fatal error, `runBatch` throws with `err.results` (the codes saved so far), so the Return
+  link and the parent still get them.
+- `/embed#t=<ticket>` (`EMBEDDED`):
+  - `useMemoryToken(ticket)` puts `auth.js` in memory-only mode.
+  - With no ticket in the fragment, the page stops and never uses a stored sign-in.
+  - `startEmbed()` calls `ticket.read`, then runs the batch at once.
+  - It posts `qr-ready` / `qr-progress` / `qr-done` / `qr-error` (with results) and `qr-resize`
+    to `ticket.parent` only.
+  - The fragment stays in the URL, so a reload keeps working, and a `hashchange` reloads with the
+    new ticket.
+
 ## auth.js (shared by every page)
 
 - The token lives in `sessionStorage`, and in `localStorage` too with "Remember". Both copies are
@@ -53,6 +72,7 @@ ignored, and a new job supersedes the running one.
 - `signedInAs` (the name) is empty unless typed on the API page. `whoAmI()` asks `spec.read` who
   the token is, stores the name, and caches the answer per token. The sign-in bar uses it.
 - `api(method, params)` POSTs JSON. A 401 clears the token and fires `auth-change`, so forms reappear.
+  In memory-only mode (embed), only the in-memory ticket is cleared.
 - `bindSignIn(onSignIn, {bar, showToken})`: while signed in, the password field is hidden (mobile
   Chrome kept offering to save it). The generator uses `bar: false` and handles its inline form itself.
 - `api.js` signs out only when a *typed* name doesn't match the token's real owner.
