@@ -130,7 +130,7 @@ function render(designs) {
 }
 
 async function load() {
-  if (!getToken()) return setMsg('Enter your admin token to see saved codes.', 'warn');
+  if (!getToken()) return setMsg('Sign in with your admin or author token to see saved codes.', 'warn');
   try {
     setMsg('Loading…');
     const author = $('author').value.trim();

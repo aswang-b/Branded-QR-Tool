@@ -1,7 +1,7 @@
 import { toSVG, drawCanvas } from './render.js';
 import { rateAtPrint } from './verify.js';
 import { luminance } from './art.js';
-import { api, store, getToken, setToken, bindSignIn } from './auth.js';
+import { api, store, getToken, setToken, bindSignIn, whoAmI } from './auth.js';
 
 const $ = (id) => document.getElementById(id);
 const hexToRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
@@ -14,7 +14,7 @@ const GOOD = 0.9; // reliability considered "phone-safe"
 let source = null;      // {el, w, h, name}
 let square = null;      // {data, width, height} RGBA square derived from `source`
 let squareCanvas = null; // the same square, for saving the logo with a design
-let editing = null;     // {id, name} of the saved code being edited (?edit=<id>)
+let editing = null;     // {id, name, author} of the saved code being edited (?edit=<id>)
 let lastSettings = null; // form settings and logo the current candidates were made with
 let lastLogo = null;
 let worker = null;
@@ -388,16 +388,20 @@ async function save(e) {
   if (!getToken()) {
     $('signin').hidden = false;
     $('token').focus();
-    msg.textContent = 'Sign in with your admin token first.';
+    msg.textContent = 'Sign in with your admin or author token first.';
     return;
   }
   const c = selected;
   try {
     msg.textContent = replace ? 'Replacing…' : 'Saving…';
     const author = $('saveAuthor').value.trim();
-    store('localStorage')?.setItem('qrAuthor', author);
+    // Remember the author the user chose, not one a link filled in (?author=).
+    if (!$('saveAuthor').readOnly && author !== linkAuthor) store('localStorage')?.setItem('qrAuthor', author);
+    // Only send new_author when it changes: author tokens may not send it at all.
+    const owner = replace ? (author !== editing.author ? { new_author: author } : {}) : (author ? { author } : {});
     const saved = await api(replace ? 'qr.update' : 'qr.create', {
-      ...(replace ? { id: editing.id, new_author: author } : { author }),
+      ...(replace ? { id: editing.id } : {}),
+      ...owner,
       name: $('saveName').value,
       details: $('saveDetails').value,
       text: c.text,
@@ -411,16 +415,20 @@ async function save(e) {
       },
       image: lastLogo,
     });
+    if (replace) setEditing({ id: saved.id, name: saved.name, author: saved.author });
     if (returnTo) {
       // Back to the project that sent us here, telling it which code was saved.
+      // A link the user presses, not an automatic redirect: a crafted ?return=
+      // can't send anyone off-site without them seeing where it goes.
       const back = new URL(returnTo);
       back.searchParams.set('qr_id', String(saved.id));
-      msg.textContent = `${replace ? 'Replaced' : 'Saved'}. Returning to ${back.host}…`;
-      location.assign(back.href);
+      const a = Object.assign(document.createElement('a'), { href: back.href, className: 'btnlink primary', textContent: `Return to ${back.host}` });
+      a.rel = 'noopener noreferrer';
+      msg.replaceChildren(`${replace ? 'Replaced' : 'Saved'}. `, a);
+      a.focus();
       return;
     }
     msg.innerHTML = `${replace ? 'Replaced' : 'Saved'}. <a href="saved.html">See saved codes</a>`;
-    if (replace) setEditing({ id: saved.id, name: saved.name });
   } catch (err) {
     msg.textContent = err.message;
     if (err.status === 401) { $('token').value = ''; $('signin').hidden = false; }
@@ -434,9 +442,10 @@ async function shorten() {
   if (!parsed) return setNote('Enter a full, valid http(s) link to shorten, e.g. https://dancewithb.fun/check-in.');
   if (/\/c\/[A-Za-z0-9]+\/?$/.test(parsed.pathname)) return setNote('That already looks like a short link.');
   if (!getToken()) {
-    const token = (prompt('Admin token (to create a short link):') || '').trim();
+    const token = (prompt('Admin or author token (to create a short link):') || '').trim();
     if (!token) return;
     setToken(token);
+    applyIdentity();
   }
   try {
     const l = await api('link.create', { url: link });
@@ -491,9 +500,10 @@ function setEditing(d) {
 /** Open a saved code in the editor: same link, logo and settings, then generate. */
 async function loadForEdit(id) {
   if (!getToken()) {
-    const t = (prompt('Admin token (to open a saved code):') || '').trim();
-    if (!t) return setNote('Enter your admin token to edit a saved code.');
+    const t = (prompt('Admin or author token (to open a saved code):') || '').trim();
+    if (!t) return setNote('Enter your admin or author token to edit a saved code.');
     setToken(t);
+    applyIdentity();
   }
   let d;
   try {
@@ -512,7 +522,7 @@ async function loadForEdit(id) {
   $('saveName').value = d.name;
   $('saveDetails').value = d.details || '';
   $('saveAuthor').value = d.author || '';
-  setEditing({ id: d.id, name: d.name });
+  setEditing({ id: d.id, name: d.name, author: d.author || '' });
   if (d.image) {
     try { setSource(await loadImage(d.image), SQUARE_PX, SQUARE_PX, 'Logo saved with this code'); } catch { /* keep the default */ }
   } else {
@@ -526,9 +536,11 @@ const presetText = params.get('text');
 if (presetText) $('text').value = presetText;
 
 /**
- * ?return=<url>: where to send the browser after a save (with ?qr_id=<id>), for
+ * ?return=<url>: where to go back to after a save (with ?qr_id=<id>), for
  * projects that open the generator to make a design. https only (or a local
  * dev server), so a link can't bounce people to javascript: or plain http.
+ * After saving, the user presses a "Return to <host>" link; nothing redirects
+ * on its own.
  */
 function parseReturn(value) {
   if (!value) return null;
@@ -542,25 +554,64 @@ const returnTo = parseReturn(params.get('return'));
 syncLabels();
 checkColors();
 setSource(demoCanvas(), SQUARE_PX, SQUARE_PX, 'dancewithb.fun logo');
-$('saveAuthor').value = params.get('author') ?? (store('localStorage')?.getItem('qrAuthor') || '');
+// ?author= fills in the author but is never remembered as the default, and the
+// note below says it came from the link, so a crafted link can't quietly hand
+// a design to someone else's token.
+const linkAuthor = params.get('author');
+const savedAuthor = store('localStorage')?.getItem('qrAuthor') || '';
+$('saveAuthor').value = linkAuthor ?? savedAuthor;
 if (params.get('name')) $('saveName').value = params.get('name');
-if (returnTo) $('saveMsg').textContent = `After saving you'll go back to ${new URL(returnTo).host}.`;
-else if (params.get('return')) $('saveMsg').textContent = 'Ignoring the return link: it must be an https:// address.';
+
+/** The lasting notes above Save: where the page will return, and a prefilled author. */
+function showReturnNote() {
+  const notes = [];
+  if (returnTo) notes.push(`After saving you can return to ${new URL(returnTo).host}.`);
+  else if (params.get('return')) notes.push('Ignoring the return link: it must be an https:// address.');
+  if (linkAuthor && $('saveAuthor').value === linkAuthor && !$('saveAuthor').readOnly) notes.push(`The link that opened this page set the author to "${linkAuthor}": check it's right before saving.`);
+  $('returnNote').textContent = notes.join(' ');
+  $('returnNote').hidden = !notes.length;
+}
+$('saveAuthor').addEventListener('input', showReturnNote);
+showReturnNote();
+
 // Suggest authorized authors (see Authors) in the save form's Author field.
 // author.read without include_tokens returns names, never tokens.
 function loadAuthorSuggestions() {
-  if (!getToken()) return;
   api('author.read').then(({ authors }) => {
     $('authorList').replaceChildren(...authors.map((a) => Object.assign(document.createElement('option'), { value: a.name })));
   }).catch(() => { /* suggestions only */ });
 }
-loadAuthorSuggestions();
+
+/**
+ * Fit the Author field to the token: an author token always saves as its own
+ * author (anything else is refused), so the field is fixed to that name. The
+ * admin gets suggestions and a free field.
+ */
+function applyIdentity() {
+  const field = $('saveAuthor');
+  if (!getToken()) {
+    if (field.readOnly) { field.readOnly = false; field.value = linkAuthor ?? savedAuthor; }
+    return showReturnNote();
+  }
+  whoAmI().then((who) => {
+    if (who?.role === 'author') {
+      field.value = who.author;
+      field.readOnly = true;
+      field.title = 'Codes saved with an author token always belong to that author.';
+    } else {
+      if (field.readOnly) { field.readOnly = false; field.title = ''; field.value = linkAuthor ?? savedAuthor; }
+      if (who?.role === 'admin') loadAuthorSuggestions();
+    }
+    showReturnNote();
+  });
+}
+applyIdentity();
 bindSignIn(() => {
+  applyIdentity();
   if (!getToken()) return;
   $('token').value = '';
   $('signin').hidden = true;
   $('saveMsg').textContent = 'Signed in. Press Save.';
-  loadAuthorSuggestions();
 }, { bar: false });
 if (params.get('edit')) loadForEdit(params.get('edit'));
 

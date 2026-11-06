@@ -151,10 +151,11 @@ async function load() {
   try {
     setMsg('Loading…');
     const spec = await api('spec.read');
-    // The token decides who you are; the name must match it.
+    // The token decides who you are. A name typed here must match it; signing
+    // in on another page stores no name, so there is nothing to check.
     const actual = spec.viewer.role === 'admin' ? 'admin' : spec.viewer.author;
     const claimed = getName();
-    if (claimed !== actual) {
+    if (claimed && claimed !== actual) {
       clearToken();
       throw new Error(`That token doesn't belong to "${claimed}". Check the author name and token.`);
     }

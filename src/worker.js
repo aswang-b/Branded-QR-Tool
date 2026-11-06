@@ -11,7 +11,8 @@
 // format "svg".
 //
 //   link.create  {url, label?, author?, key?}                     admin, author*
-//                (with a key, a repeat create returns the existing link, 200)
+//                (with a key, a repeat create returns the existing link, 200;
+//                409 if it now asks for a different url or label)
 //   link.read    {code | key, stats?, tz?, days?} -> one link (+ daily scans)
 //                {author?, limit?, offset?} -> list                admin, author*
 //   link.update  {code, url?, label?, new_author?, if_url?}       admin, author*
@@ -25,7 +26,9 @@
 //   qr.delete    {id}                                             admin, author*
 //   * an author token only ever sees its own author's links and designs, and
 //     what it creates is always its own; it can't move anything to another
-//     author or delete links.
+//     author or delete links. A design it saves is only tied to a short link
+//     (link_id) when that link is its own, so a design can't reveal another
+//     author's destination.
 //   author.create {name, adopt_existing?} -> the author with a new token  admin
 //   author.read   {name} -> one author with token |
 //                 {include_tokens?} -> list                         admin
@@ -72,6 +75,13 @@ const MAX_IMAGE_LENGTH = 300_000; // source logo, as a PNG data URL
 const MAX_AUTHOR_LENGTH = 200;
 const MAX_KEY_LENGTH = 100;
 const MAX_STATS_DAYS = 400;
+// Scans are counted per 15 minutes: every time zone's offset is a whole number
+// of quarter hours (India +5:30, Nepal +5:45), so days split exactly anywhere.
+const SLOT_SECONDS = 900;
+// Slots older than this can never be shown (stats go back MAX_STATS_DAYS), so
+// about one scan in PRUNE_EVERY deletes its link's expired slots.
+const KEEP_SLOTS = Math.ceil(((MAX_STATS_DAYS + 2) * 86400) / SLOT_SECONDS);
+const PRUNE_EVERY = 200;
 
 // ---------------------------------------------------------------- codes
 
@@ -338,14 +348,24 @@ function ensureSchema(db) {
     .then(() => db.batch([
       db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS links_key ON links (author, client_key) WHERE client_key IS NOT NULL'),
       db.prepare('CREATE INDEX IF NOT EXISTS designs_link ON designs (link_id, id)'),
-      // Scans per link per UTC hour (hour = Unix seconds / 3600), so a caller
-      // can group them into days in any time zone.
+      // Scans per link per UTC hour: replaced by link_hits below (whole hours
+      // split days wrongly in half-hour time zones). Still read for old scans.
       db.prepare(
         `CREATE TABLE IF NOT EXISTS link_hits_hourly (
            link_id INTEGER NOT NULL,
            hour INTEGER NOT NULL,
            hits INTEGER NOT NULL DEFAULT 0,
            PRIMARY KEY (link_id, hour)
+         ) WITHOUT ROWID`,
+      ),
+      // Scans per link per 15 minutes (slot = Unix seconds / 900), so a caller
+      // can group them into days in any time zone.
+      db.prepare(
+        `CREATE TABLE IF NOT EXISTS link_hits (
+           link_id INTEGER NOT NULL,
+           slot INTEGER NOT NULL,
+           hits INTEGER NOT NULL DEFAULT 0,
+           PRIMARY KEY (link_id, slot)
          ) WITHOUT ROWID`,
       ),
     ]))
@@ -382,7 +402,9 @@ function present(row, base) {
   };
 }
 
-function presentDesign(row, base, { withSvg = false, svgUrl = null } = {}) {
+function presentDesign(row, base, { withSvg = false, svgUrl = null, who = null } = {}) {
+  // An author only sees the destinations of their own links.
+  const linkUrl = who?.role === 'author' && row.link_author !== who.author ? null : row.link_url ?? null;
   let meta = {};
   try { meta = JSON.parse(row.meta || '{}'); } catch { /* keep {} */ }
   const out = {
@@ -391,7 +413,7 @@ function presentDesign(row, base, { withSvg = false, svgUrl = null } = {}) {
     details: row.details,
     author: row.author ?? '',
     text: row.text,
-    link: row.link_id ? { code: encodeId(row.link_id), short: `${base}/c/${encodeId(row.link_id)}`, url: row.link_url ?? null } : null,
+    link: row.link_id ? { code: encodeId(row.link_id), short: `${base}/c/${encodeId(row.link_id)}`, url: linkUrl } : null,
     meta,
     created_at: row.created_at,
     svg_url: svgUrl,
@@ -411,13 +433,21 @@ async function redirect(request, env, ctx, rawCode) {
   if (!row) return notFound();
   if (request.method === 'GET') {
     const now = Math.floor(Date.now() / 1000);
-    ctx.waitUntil(
-      env.DB.batch([
-        env.DB.prepare('UPDATE links SET hits = hits + 1, last_hit = ? WHERE id = ?').bind(now, id),
-        env.DB.prepare('INSERT INTO link_hits_hourly (link_id, hour, hits) VALUES (?, ?, 1) ON CONFLICT (link_id, hour) DO UPDATE SET hits = hits + 1')
-          .bind(id, Math.floor(now / 3600)),
-      ]).catch((e) => console.error('hit counter failed', e)),
-    );
+    const slot = Math.floor(now / SLOT_SECONDS);
+    // One batch, one round trip: the running total plus this quarter hour's count.
+    const stmts = [
+      env.DB.prepare('UPDATE links SET hits = hits + 1, last_hit = ? WHERE id = ?').bind(now, id),
+      env.DB.prepare('INSERT INTO link_hits (link_id, slot, hits) VALUES (?, ?, 1) ON CONFLICT (link_id, slot) DO UPDATE SET hits = hits + 1')
+        .bind(id, slot),
+    ];
+    if (Math.random() * PRUNE_EVERY < 1) {
+      const oldest = slot - KEEP_SLOTS;
+      stmts.push(
+        env.DB.prepare('DELETE FROM link_hits WHERE link_id = ? AND slot < ?').bind(id, oldest),
+        env.DB.prepare('DELETE FROM link_hits_hourly WHERE link_id = ? AND hour < ?').bind(id, Math.floor((oldest * SLOT_SECONDS) / 3600)),
+      );
+    }
+    ctx.waitUntil(env.DB.batch(stmts).catch((e) => console.error('hit counter failed', e)));
   }
   // 302 (not 301): destinations can be edited later, so browsers must not cache it.
   // Browsers copy the request's #fragment onto a redirect target that has none;
@@ -432,7 +462,7 @@ async function redirect(request, env, ctx, rawCode) {
 
 // ---------------------------------------------------------------- API methods
 
-const DESIGN_COLUMNS = 'd.id, d.name, d.details, d.author, d.text, d.link_id, d.meta, d.created_at, l.url AS link_url, a.token_hash AS author_token_hash';
+const DESIGN_COLUMNS = 'd.id, d.name, d.details, d.author, d.text, d.link_id, d.meta, d.created_at, l.url AS link_url, l.author AS link_author, a.token_hash AS author_token_hash';
 const DESIGN_FROM = "designs d LEFT JOIN links l ON l.id = d.link_id LEFT JOIN authors a ON a.name = d.author AND d.author != ''";
 const LINK_COLUMNS = 'id, url, label, author, created_at, updated_at, client_key, hits, last_hit';
 
@@ -536,6 +566,13 @@ const authorUpdate = async ({ env, p }) => {
   if (newName !== name) {
     if (await env.DB.prepare('SELECT 1 FROM authors WHERE name = ?').bind(newName).first()) throw new HttpError(409, `An author named "${newName}" already exists`);
     await guardAdoption(env, newName, p);
+    // Link keys are unique per author, so adopting links whose keys clash would fail.
+    const { results: clash } = await env.DB.prepare(
+      'SELECT client_key FROM links WHERE author = ?1 AND client_key IN (SELECT client_key FROM links WHERE author = ?2 AND client_key IS NOT NULL) LIMIT 5',
+    ).bind(name, newName).all();
+    if (clash.length) {
+      throw new HttpError(409, `"${name}" and "${newName}" both have links with the key(s) ${clash.map((r) => `"${r.client_key}"`).join(', ')}. Change or delete one link of each pair first.`);
+    }
   }
   const stmts = [];
   if (p.rotate_token) {
@@ -551,7 +588,8 @@ const authorUpdate = async ({ env, p }) => {
   try {
     await env.DB.batch(stmts);
   } catch (e) {
-    if (/UNIQUE/i.test(String(e?.message ?? e))) throw new HttpError(409, `An author named "${newName}" already exists`);
+    // A name or key taken between the checks above and this batch.
+    if (/UNIQUE/i.test(String(e?.message ?? e))) throw new HttpError(409, `Could not rename to "${newName}": that name or one of its link keys was just taken. Try again.`);
     throw e;
   }
   return json(presentAuthor(await env.DB.prepare(`${AUTHOR_SELECT} WHERE a.name = ?`).bind(newName).first()));
@@ -593,10 +631,17 @@ const linkCreate = async ({ req, env, base, p, who }) => {
   const label = parseLabel(p.label);
   const author = ownerFor(p, who);
   const key = parseKey(p.key);
-  // Idempotent with a key: a retried create returns the link it made the first time.
+  // Idempotent with a key: a retried create returns the link it made the first
+  // time. A create that asks for something else under the same key is refused,
+  // so a caller never mistakes the old destination for the one it sent.
+  const reuse = (existing) => {
+    if (existing.url === url && (p.label === undefined || existing.label === label)) return json(present(existing, base), 200);
+    const what = existing.url === url ? 'label' : 'url';
+    return json({ error: `A link with key "${key}" already exists with a different ${what}. Use link.update to change it.`, link: present(existing, base) }, 409);
+  };
   if (key) {
     const existing = await linkByKey(env, author, key);
-    if (existing) return json(present(existing, base), 200);
+    if (existing) return reuse(existing);
   }
   const now = Math.floor(Date.now() / 1000);
   try {
@@ -608,7 +653,7 @@ const linkCreate = async ({ req, env, base, p, who }) => {
     // Two creates with the same key at once: the loser returns the winner's link.
     if (key && /UNIQUE/i.test(String(e?.message ?? e))) {
       const existing = await linkByKey(env, author, key);
-      if (existing) return json(present(existing, base), 200);
+      if (existing) return reuse(existing);
     }
     throw e;
   }
@@ -634,11 +679,15 @@ async function linkStats(env, id, p) {
   const [y, m, d] = dateIn(fmt, now).split('-').map(Number);
   const dates = Array.from({ length: days }, (_, i) => new Date(Date.UTC(y, m - 1, d - (days - 1 - i))).toISOString().slice(0, 10));
   const counts = new Map(dates.map((date) => [date, 0]));
-  // Every hour that could fall on those dates (time zones are within ±14 h of UTC).
-  const fromHour = Math.floor((Date.UTC(y, m - 1, d - (days - 1)) - 15 * 3600_000) / 3600_000);
-  const { results } = await env.DB.prepare('SELECT hour, hits FROM link_hits_hourly WHERE link_id = ? AND hour >= ?').bind(id, fromHour).all();
+  // Every slot that could fall on those dates (time zones are within ±14 h of UTC).
+  const fromMs = Date.UTC(y, m - 1, d - (days - 1)) - 15 * 3600_000;
+  // Scans from before link_hits sit in whole-hour buckets, placed at their hour's start.
+  const { results } = await env.DB.prepare(
+    `SELECT slot * ${SLOT_SECONDS} AS t, hits FROM link_hits WHERE link_id = ?1 AND slot >= ?2
+     UNION ALL SELECT hour * 3600 AS t, hits FROM link_hits_hourly WHERE link_id = ?1 AND hour >= ?3`,
+  ).bind(id, Math.floor(fromMs / 1000 / SLOT_SECONDS), Math.floor(fromMs / 3600_000)).all();
   for (const r of results) {
-    const date = dateIn(fmt, r.hour * 3600_000);
+    const date = dateIn(fmt, r.t * 1000);
     if (counts.has(date)) counts.set(date, counts.get(date) + r.hits);
   }
   return { tz, days: dates.map((date) => ({ date, hits: counts.get(date) })) };
@@ -701,6 +750,7 @@ const linkDelete = async ({ env, p }) => {
   const id = parseLinkCode(p.code);
   const [res] = await env.DB.batch([
     env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id),
+    env.DB.prepare('DELETE FROM link_hits WHERE link_id = ?').bind(id),
     env.DB.prepare('DELETE FROM link_hits_hourly WHERE link_id = ?').bind(id),
   ]);
   return res.meta?.changes ? json({ deleted: encodeId(id) }) : json({ error: 'Not found' }, 404);
@@ -726,6 +776,17 @@ const svgUrlFor = async (env, base, row) => `${base}/q/${row.id}.svg?sig=${await
 
 /** A design (with its signed image link) as returned by the API. */
 const designOut = async (env, base, row, opts = {}) => presentDesign(row, base, { ...opts, svgUrl: await svgUrlFor(env, base, row) });
+
+/**
+ * The short link a design's text opens, if any. For an author token, only one
+ * of its own links: tying a design to another author's link would show that
+ * link's destination in the reply.
+ */
+async function designLinkId(env, text, req, who) {
+  const id = linkIdFor(text, req, env);
+  if (id === null || who.role !== 'author') return id;
+  return (await env.DB.prepare('SELECT 1 FROM links WHERE id = ? AND author = ?').bind(id, who.author).first()) ? id : null;
+}
 
 async function signedImage(request, env, rawId, url) {
   if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
@@ -754,10 +815,10 @@ const qrCreate = async ({ req, env, base, p, who }) => {
       parseText(p.name, 'name', MAX_NAME_LENGTH),
       parseText(p.details, 'details', MAX_DETAILS_LENGTH, { required: false }),
       ownerFor(p, who),
-      text, linkIdFor(text, req, env), parseSvg(p.svg), parseMeta(p.meta), parseImage(p.image), Math.floor(Date.now() / 1000),
+      text, await designLinkId(env, text, req, who), parseSvg(p.svg), parseMeta(p.meta), parseImage(p.image), Math.floor(Date.now() / 1000),
     )
     .first();
-  return json(await designOut(env, base, await fetchDesign(env.DB, id, null)), 201);
+  return json(await designOut(env, base, await fetchDesign(env.DB, id, null), { who }), 201);
 };
 
 const qrRead = async ({ env, base, p, who }) => {
@@ -767,7 +828,7 @@ const qrRead = async ({ env, base, p, who }) => {
     if (format !== 'json' && format !== 'svg') throw new HttpError(400, '"format" must be "json" or "svg"');
     const row = await fetchDesign(env.DB, parseDesignId(p.id), author, ', d.svg, d.image');
     if (!row) return json({ error: 'Not found' }, 404);
-    if (format === 'json') return json(await designOut(env, base, row, { withSvg: true }));
+    if (format === 'json') return json(await designOut(env, base, row, { withSvg: true, who }));
     // The raw image, for another project's server to inline or serve itself.
     return new Response(row.svg, { headers: { ...SVG_HEADERS, 'Cache-Control': 'private, max-age=300' } });
   }
@@ -783,7 +844,7 @@ const qrRead = async ({ env, base, p, who }) => {
   const { results } = await env.DB.prepare(`SELECT ${DESIGN_COLUMNS} FROM ${DESIGN_FROM}${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY d.id DESC LIMIT ? OFFSET ?`)
     .bind(...args, limit, offset)
     .all();
-  return json({ designs: await Promise.all(results.map((r) => designOut(env, base, r))) });
+  return json({ designs: await Promise.all(results.map((r) => designOut(env, base, r, { who }))) });
 };
 
 const qrUpdate = async ({ req, env, base, p, who }) => {
@@ -803,7 +864,7 @@ const qrUpdate = async ({ req, env, base, p, who }) => {
   if (p.text !== undefined) {
     const text = parseText(p.text, 'text', MAX_TEXT_LENGTH);
     sets.push('text = ?', 'link_id = ?', 'svg = ?');
-    args.push(text, linkIdFor(text, req, env), parseSvg(p.svg));
+    args.push(text, await designLinkId(env, text, req, who), parseSvg(p.svg));
   }
   if (p.meta !== undefined) { sets.push('meta = ?'); args.push(parseMeta(p.meta)); }
   if (p.image !== undefined) { sets.push('image = ?'); args.push(parseImage(p.image)); }
@@ -811,7 +872,7 @@ const qrUpdate = async ({ req, env, base, p, who }) => {
   const scope = author === null ? ['', []] : [' AND author = ?', [author]];
   const res = await env.DB.prepare(`UPDATE designs SET ${sets.join(', ')} WHERE id = ?${scope[0]}`).bind(...args, id, ...scope[1]).run();
   if (!res.meta?.changes) return json({ error: 'Not found' }, 404);
-  return json(await designOut(env, base, await fetchDesign(env.DB, id, null)));
+  return json(await designOut(env, base, await fetchDesign(env.DB, id, null), { who }));
 };
 
 const qrDelete = async ({ env, p, who }) => {

@@ -563,6 +563,40 @@ test('authors cannot silently take over codes and links already carrying their n
   await expectStatus(await rpc('author.create', { name: 'carol', adopt_existing: 'yes' }), 400);
 });
 
+test('renaming onto a name whose links share a key says which keys clash', async () => {
+  const k = await authorKey('dana');
+  await (await rpc('link.create', { url: 'https://example.com/d', key: 'checkin' }, k)).arrayBuffer();
+  await (await rpc('link.create', { url: 'https://example.com/e', author: 'erin', key: 'checkin' })).arrayBuffer();
+  const r = await rpc('author.update', { name: 'dana', new_name: 'erin', adopt_existing: true });
+  assert.equal(r.status, 409);
+  assert.match((await r.json()).error, /both have links with the key\(s\) "checkin"/);
+  // nothing moved
+  assert.equal((await (await rpc('link.read', { key: 'checkin' }, k)).json()).url, 'https://example.com/d');
+});
+
+test("an author's design can't show another author's link destination", async () => {
+  const ka = await authorKey('peek-a');
+  const kb = await authorKey('peek-b');
+  const secret = await (await rpc('link.create', { url: 'https://example.com/b-private' }, kb)).json();
+  const own = await (await rpc('link.create', { url: 'https://example.com/a-own' }, ka)).json();
+  // pointing a design at someone else's short link doesn't tie it to that link
+  const made = await (await rpc('qr.create', { name: 'peek', text: secret.short, svg: SVG }, ka)).json();
+  assert.equal(made.link, null);
+  assert.ok(!JSON.stringify(made).includes('b-private'));
+  const upd = await (await rpc('qr.update', { id: made.id, text: `${secret.short}#x`, svg: SVG }, ka)).json();
+  assert.equal(upd.link, null);
+  assert.equal((await (await rpc('qr.read', { link: secret.code }, ka)).json()).designs.length, 0);
+  // its own link still works
+  const mine = await (await rpc('qr.create', { name: 'mine', text: own.short, svg: SVG }, ka)).json();
+  assert.equal(mine.link.url, 'https://example.com/a-own');
+  // a design the admin tied to another author's link: the author sees the code, not the url
+  const byAdmin = await (await rpc('qr.create', { name: 'admin-made', text: secret.short, svg: SVG, author: 'peek-a' })).json();
+  assert.equal(byAdmin.link.url, 'https://example.com/b-private');
+  const seen = await (await rpc('qr.read', { id: byAdmin.id }, ka)).json();
+  assert.equal(seen.link.code, secret.code);
+  assert.equal(seen.link.url, null);
+});
+
 test('a destination may not loop back to a short link on any of our hosts', async () => {
   // wBase's PUBLIC_BASE_URL is https://dancewithb.fun: links made through 127.0.0.1 can't point there either
   for (const url of ['https://dancewithb.fun/c/a', 'https://dancewithb.fun/C/a', `${wBase.base}/c/a`]) {
@@ -610,12 +644,22 @@ test('link.create with a key is idempotent, and link.read finds it by key', asyn
   assert.equal(first.status, 201);
   const made = await first.json();
   assert.equal(made.key, 'dancewithb-checkin');
-  // a retry (even with another url) returns the same link, unchanged
-  const again = await rpc('link.create', { ...body, url: 'https://example.com/other' }, k);
+  // a retry returns the same link
+  const again = await rpc('link.create', body, k);
   assert.equal(again.status, 200);
-  const same = await again.json();
-  assert.equal(same.code, made.code);
-  assert.equal(same.url, 'https://dancewithb.fun/check-in');
+  assert.equal((await again.json()).code, made.code);
+  // a label left out still matches
+  assert.equal((await rpc('link.create', { url: body.url, key: body.key }, k)).status, 200);
+  // the same key with another url or label is refused, and shows the link as it is
+  const moved = await rpc('link.create', { ...body, url: 'https://example.com/other' }, k);
+  assert.equal(moved.status, 409);
+  const conflict = await moved.json();
+  assert.match(conflict.error, /different url.*link\.update/);
+  assert.equal(conflict.link.code, made.code);
+  assert.equal(conflict.link.url, 'https://dancewithb.fun/check-in');
+  const relabelled = await rpc('link.create', { ...body, label: 'Other' }, k);
+  assert.equal(relabelled.status, 409);
+  assert.match((await relabelled.json()).error, /different label/);
   // simultaneous creates still make one link
   const racers = await Promise.all([1, 2, 3].map(() => rpc('link.create', { ...body, key: 'race' }, k)));
   const codes = new Set(await Promise.all(racers.map((r) => r.json().then((j) => j.code))));
@@ -659,6 +703,11 @@ test('link.read stats: scans per day in a time zone', async () => {
   assert.deepEqual(r.stats.days.at(-1), { date: today, hits: 3 });
   assert.equal(r.stats.days.reduce((s, d) => s + d.hits, 0), 3);
   assert.ok(r.stats.days.every((d, i, a) => !i || a[i - 1].date < d.date));
+  // quarter-hour buckets: half- and quarter-hour time zones put today's scans on today
+  for (const tz of ['Asia/Kolkata', 'Asia/Kathmandu', 'America/St_Johns']) {
+    const s = (await (await rpc('link.read', { code: link.code, stats: true, tz, days: 2 })).json()).stats;
+    assert.deepEqual(s.days.at(-1), { date: new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date()), hits: 3 }, tz);
+  }
   // over GET too, default UTC and 30 days
   const g = await (await call(`/api/link.read?code=${link.code}&stats=true`, { headers: auth })).json();
   assert.equal(g.stats.tz, 'UTC');

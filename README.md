@@ -135,7 +135,7 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 
 | Method | Params | Returns | Who |
 |---|---|---|---|
-| `link.create` | `url`, `label?`, `author?`, `key?` | the link (201; 200 if `key` already existed) | admin, author* |
+| `link.create` | `url`, `label?`, `author?`, `key?` | the link (201; 200 if `key` already existed with that url; 409 if it differs) | admin, author* |
 | `link.read` | `code` or `key`, `stats?`, `tz?`, `days?` | one link (with scans per day if `stats`) | admin, author* |
 | `link.read` | `author?`, `limit?`, `offset?` | `{links: […]}`, newest first | admin, author* |
 | `link.update` | `code`, `url?`, `label?`, `new_author?`, `if_url?` | the link (409 if `if_url` no longer matches) | admin, author* |
@@ -189,10 +189,12 @@ that was already generated). Other projects use them through the API with their 
 
 - **Create a short link:** `link.create {url, label, key}` makes one owned by the token's author (e.g. the
   check-in link a printed code will open). With a `key`, a retried create returns the same link
-  instead of a second one, and `link.read {key}` finds it later.
+  instead of a second one (or 409 if it now asks for a different url or label: use `link.update`),
+  and `link.read {key}` finds it later.
 - **Make its branded design:** send the admin to
   `https://qr.dancewithb.fun/?text=<short link>&author=<author>&name=<name>&return=<https url>`. The
-  generator fills those in, and after Save sends the browser back to `return` with `?qr_id=<id>`
+  generator fills those in (saying the author came from the link), and after Save shows a
+  "Return to <host>" button that goes back to `return` with `?qr_id=<id>`
   added (https only, or a localhost dev server).
 - **Show the author's codes:** `qr.read {}` lists them, `qr.read {link: "c"}` just those for one
   short link. Every code has a `svg_url` (`/q/<id>.svg?sig=…`), a signed image link an `<img>` can
@@ -224,11 +226,12 @@ Worker redirects (HTTP 302) to wherever that code currently points.
 
 - **Codes** are a counter written with `a–z` then `0–9`: `a, b, … z, 0, 1, … 9, aa, ab, … a9, ba, …`.
   A character is added after `9`, and again after `99`. Codes are never reused, even after a delete.
-- **Managing links:** open `/links.html`, enter the admin token, create links, change a destination
-  later, delete, and see scan counts. "QR" opens the maker with the short URL filled in.
+- **Managing links:** open `/links.html`, enter the admin or an author token, create links, change a destination
+  later, delete (admin only), and see scan counts. "QR" opens the maker with the short URL filled in.
 - **API:** `link.create`, `link.read`, `link.update`, `link.delete` (see *API*).
 - **Storage** is D1, created automatically on first use. Each scan costs one read and one batched
-  write (the total, plus an hourly counter for per-day stats), sent after the redirect; the free plan
+  write (the total, plus a 15-minute counter for per-day stats in any time zone), sent after the
+  redirect; about one scan in 200 also deletes that link's counters older than 400 days. The free plan
   allows on the order of 100k writes/day (check Cloudflare's current limits).
 
 ## Deploy to Cloudflare (free)

@@ -78,7 +78,7 @@ function render(links) {
 }
 
 async function load() {
-  if (!getToken()) return setMsg('Enter your admin token to manage links.', 'warn');
+  if (!getToken()) return setMsg('Sign in with your admin or author token to manage links.', 'warn');
   try {
     setMsg('Loading…');
     render((await api('link.read', { limit: 200 })).links);
@@ -93,7 +93,7 @@ $('refresh').addEventListener('click', load);
 $('create').addEventListener('click', async () => {
   const box = $('created');
   box.hidden = true;
-  if (!getToken()) return setMsg('Enter your admin token first.', 'warn');
+  if (!getToken()) return setMsg('Sign in with your admin or author token first.', 'warn');
   try {
     const l = await api('link.create', { url: $('dest').value, label: $('label').value || undefined, author: $('author').value.trim() || undefined });
     box.hidden = false;

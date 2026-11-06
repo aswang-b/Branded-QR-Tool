@@ -151,10 +151,10 @@
             </div>
             <h3 class="save-title">Save this code</h3>
             <form class="field signin-inline" id="signin" method="post" action="#" hidden>
-              <label for="token">Admin token <span class="muted">(needed to save)</span></label>
+              <label for="token">Token <span class="muted">(admin or author, needed to save)</span></label>
               <input type="text" name="username" value="admin" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">
               <div class="row nowrap">
-                <input id="token" name="password" type="password" autocomplete="current-password" spellcheck="false" placeholder="the ADMIN_TOKEN secret">
+                <input id="token" name="password" type="password" autocomplete="current-password" spellcheck="false" placeholder="the admin token, or your qra_… author token">
                 <button type="submit" class="small">Sign in</button>
               </div>
               <label class="check"><input id="remember" type="checkbox"> Remember on this device</label>
@@ -164,6 +164,7 @@
               <textarea id="saveDetails" maxlength="2000" rows="2" placeholder="Details (optional): where it's used, print size…"></textarea>
               <input id="saveAuthor" type="text" maxlength="200" list="authorList" autocomplete="off" placeholder="Author (optional): whose code this is; other projects list codes by author">
               <datalist id="authorList"></datalist>
+              <p id="returnNote" class="hint" hidden></p>
               <div class="row"><button type="submit" class="primary" id="replaceBtn" value="replace" hidden>Replace</button><button type="submit" class="primary" id="saveNew" value="new">Save</button><span id="saveMsg" class="hint"></span></div>
             </form>
           </div>
