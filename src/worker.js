@@ -36,6 +36,14 @@
 //   author.delete {name}                                          admin
 //   spec.read    {} -> this API's specification (see spec.js); authors
 //                get the part their token can use                  admin, author
+//   ticket.create {links, from?, name?, parent, author?} -> {url, …} admin, author
+//                a 10-minute embed ticket (see below)
+//   ticket.read   {} -> what the calling ticket allows               ticket
+//
+// Embedding (GET /embed#t=<ticket>): the generator page, framed by a site in
+// EMBED_PARENTS, makes and saves one code per ticket link and posts the
+// results to the parent window. A ticket ("qrt_…") acts as its author but may
+// only read its links and template code and save one code per link.
 //
 // Everything else is served from the static assets (see wrangler.jsonc: the
 // Worker only runs for /c/* and /api/*, so the site itself stays free of
@@ -75,6 +83,8 @@ const MAX_IMAGE_LENGTH = 300_000; // source logo, as a PNG data URL
 const MAX_AUTHOR_LENGTH = 200;
 const MAX_KEY_LENGTH = 100;
 const MAX_STATS_DAYS = 400;
+const TICKET_TTL = 600; // seconds an embed ticket lasts
+const MAX_TICKET_LINKS = 25;
 // Scans are counted per 15 minutes: every time zone's offset is a whole number
 // of quarter hours (India +5:30, Nepal +5:45), so days split exactly anywhere.
 const SLOT_SECONDS = 900;
@@ -134,6 +144,9 @@ async function safeEqual(a, b) {
 const sha256Hex = async (text) =>
   [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, '0')).join('');
 
+/** A new embed ticket: "qrt_" + 32 random bytes, base64url. */
+const newTicketToken = () => 'qrt_' + newAuthorToken().slice(4);
+
 /** A new author token: "qra_" + 32 random bytes, base64url. */
 function newAuthorToken() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -152,6 +165,14 @@ async function authorize(request, env, ctx) {
   const unauthorized = () => json({ error: 'Unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
   if (!given) return unauthorized();
   if (await safeEqual(given, env.ADMIN_TOKEN)) return { role: 'admin' };
+  if (given.startsWith('qrt_')) {
+    // An embed ticket: acts as its author, limited by api() to what it covers.
+    await ensureSchema(env.DB);
+    const t = await env.DB.prepare('SELECT author, links, from_id, name, parent, expires_at FROM tickets WHERE token_hash = ? AND expires_at > ?')
+      .bind(await sha256Hex(given), Math.floor(Date.now() / 1000)).first();
+    if (!t) return unauthorized();
+    return { role: 'author', author: t.author, ticket: { links: JSON.parse(t.links), from: t.from_id, name: t.name, parent: t.parent, expires_at: t.expires_at } };
+  }
   if (!given.startsWith('qra_')) return unauthorized();
   await ensureSchema(env.DB);
   const hash = await sha256Hex(given);
@@ -367,6 +388,19 @@ function ensureSchema(db) {
            hits INTEGER NOT NULL DEFAULT 0,
            PRIMARY KEY (link_id, slot)
          ) WITHOUT ROWID`,
+      ),
+      // Embed tickets (ticket.create): short-lived, stored by hash only.
+      db.prepare(
+        `CREATE TABLE IF NOT EXISTS tickets (
+           token_hash TEXT PRIMARY KEY,
+           author TEXT NOT NULL,
+           links TEXT NOT NULL,
+           from_id INTEGER,
+           name TEXT NOT NULL DEFAULT '',
+           parent TEXT NOT NULL,
+           created_at INTEGER NOT NULL,
+           expires_at INTEGER NOT NULL
+         )`,
       ),
     ]))
     .catch((e) => {
@@ -883,6 +917,80 @@ const qrDelete = async ({ env, p, who }) => {
   return res.meta?.changes ? json({ deleted: id }) : json({ error: 'Not found' }, 404);
 };
 
+// ---------------------------------------------------------------- embed tickets
+
+/** Origins allowed to frame /embed and receive its results (EMBED_PARENTS, space-separated). */
+const embedParents = (env) => (env.EMBED_PARENTS || '').split(/\s+/).filter(Boolean).map((o) => { try { return new URL(o).origin; } catch { return null; } }).filter(Boolean);
+
+const ticketCreate = async ({ env, base, p, who }) => {
+  // The ticket acts as one author: the caller's own, or (admin) the one named.
+  const author = who.role === 'author' ? authorScope(p, who) : parseText(p.author ?? '', 'author', MAX_AUTHOR_LENGTH, { required: false });
+  const raw = typeof p.links === 'string' ? p.links.split(',') : p.links;
+  if (!Array.isArray(raw)) throw new HttpError(400, '"links" must be a list of short codes, e.g. ["d", "e"]');
+  const codes = [...new Set(raw.map((c) => (typeof c === 'string' ? c.trim().toLowerCase() : '')))];
+  if (!codes.length || codes.length > MAX_TICKET_LINKS || codes.some((c) => decodeCode(c) === null))
+    throw new HttpError(400, `"links" must be 1-${MAX_TICKET_LINKS} short codes, e.g. ["d", "e"]`);
+  const ids = codes.map(decodeCode);
+  const { results } = await env.DB.prepare(`SELECT id FROM links WHERE author = ? AND id IN (${ids.map(() => '?').join(', ')})`).bind(author, ...ids).all();
+  const found = new Set(results.map((r) => r.id));
+  const missing = codes.filter((c) => !found.has(decodeCode(c)));
+  if (missing.length) throw new HttpError(404, `Not found (or not ${author ? `"${author}"` : 'unowned'}'s): ${missing.join(', ')}`);
+  let fromId = null;
+  if (p.from !== undefined && p.from !== null) {
+    fromId = parseDesignId(p.from);
+    if (!(await fetchDesign(env.DB, fromId, author))) throw new HttpError(404, `Saved code ${fromId} not found (or not ${author ? `"${author}"` : 'unowned'}'s)`);
+  }
+  const name = parseText(p.name, 'name', MAX_NAME_LENGTH, { required: false });
+  let parent = null;
+  try { parent = typeof p.parent === 'string' ? new URL(p.parent).origin : null; } catch { /* below */ }
+  const allowed = embedParents(env);
+  if (!parent || !allowed.includes(parent)) throw new HttpError(400, `"parent" must be the origin of the page that frames the generator, one of: ${allowed.join(', ') || '(none configured: set EMBED_PARENTS)'}`);
+  const token = newTicketToken();
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM tickets WHERE expires_at < ?').bind(now - 86400),
+    env.DB.prepare('INSERT INTO tickets (token_hash, author, links, from_id, name, parent, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(await sha256Hex(token), author, JSON.stringify(codes), fromId, name, parent, now, now + TICKET_TTL),
+  ]);
+  return json({ url: `${base}/embed#t=${token}`, links: codes, from: fromId, name, parent, author, expires_at: now + TICKET_TTL }, 201);
+};
+
+const ticketRead = async ({ who }) => {
+  if (!who.ticket) throw new HttpError(400, 'ticket.read is called with a ticket ("qrt_…") as the token');
+  const t = who.ticket;
+  return json({ author: who.author, links: t.links, from: t.from, name: t.name, parent: t.parent, expires_at: t.expires_at });
+};
+
+const TICKET_METHODS = new Set(['ticket.read', 'spec.read', 'link.read', 'qr.read', 'qr.create']);
+
+/** What a ticket may do beyond its author's rights: only its links, its template, one code per link. */
+async function checkTicket(name, p, who, req, env) {
+  const t = who.ticket;
+  const deny = () => { throw new HttpError(403, `This ticket does not cover that ${name} call`); };
+  const covered = (code) => typeof code === 'string' && t.links.includes(code.trim().toLowerCase());
+  if (!TICKET_METHODS.has(name)) throw new HttpError(403, `A ticket cannot call ${name}`);
+  if (name === 'link.read' && (p.key !== undefined || !covered(p.code))) deny();
+  if (name === 'qr.read' && (p.id !== undefined ? !(t.from && String(p.id).trim() === String(t.from)) : !covered(p.link))) deny();
+  if (name === 'qr.create') {
+    const id = typeof p.text === 'string' ? linkIdFor(p.text.trim(), req, env) : null;
+    if (id === null || !t.links.includes(encodeId(id))) deny();
+    const existing = await env.DB.prepare('SELECT id FROM designs WHERE link_id = ? AND author = ? LIMIT 1').bind(id, who.author).first();
+    if (existing) throw new HttpError(409, `Link ${encodeId(id)} already has a code (#${existing.id})`);
+  }
+}
+
+/** The generator page for iframes: index.html, frameable only by EMBED_PARENTS. */
+async function embedPage(request, env) {
+  if (!env.ASSETS || (request.method !== 'GET' && request.method !== 'HEAD')) return notFound();
+  const page = await env.ASSETS.fetch(new Request(new URL('/', request.url), { method: request.method }));
+  const res = new Response(page.body, page);
+  const parents = embedParents(env);
+  res.headers.set('Content-Security-Policy', `frame-ancestors ${parents.length ? parents.join(' ') : "'none'"}`);
+  res.headers.set('Referrer-Policy', 'no-referrer');
+  res.headers.set('Cache-Control', 'no-store');
+  return res;
+}
+
 /** read: callable with GET; big: accepts design-sized bodies. */
 const METHODS = {
   'link.create': { roles: ['admin', 'author'], run: linkCreate },
@@ -897,6 +1005,8 @@ const METHODS = {
   'author.read': { roles: ['admin'], read: true, run: authorRead },
   'author.update': { roles: ['admin'], run: authorUpdate },
   'author.delete': { roles: ['admin'], run: authorDelete },
+  'ticket.create': { roles: ['admin', 'author'], run: ticketCreate },
+  'ticket.read': { roles: ['author'], read: true, run: ticketRead },
   'spec.read': { roles: ['admin', 'author'], read: true, run: ({ base, who }) => json(buildSpec(METHODS, base, who)) },
 };
 
@@ -908,11 +1018,13 @@ async function api(request, env, url, ctx) {
   if (request.method !== 'POST' && !(method.read && request.method === 'GET')) return json({ error: `${name} takes ${verbs}` }, 405, { Allow: verbs });
   const who = await authorize(request, env, ctx);
   if (who instanceof Response) return who;
-  if (!method.roles.includes(who.role)) return json({ error: `An author token cannot call ${name}` }, 403);
+  if (!method.roles.includes(who.role)) return json({ error: `This token cannot call ${name}` }, 403);
   const p = request.method === 'GET'
     ? Object.fromEntries(url.searchParams)
     : await readJson(request, method.big ? MAX_DESIGN_BODY_BYTES : MAX_BODY_BYTES);
   await ensureSchema(env.DB);
+  if (who.ticket) await checkTicket(name, p, who, request, env);
+  else if (name === 'ticket.read') throw new HttpError(400, 'ticket.read is called with a ticket ("qrt_…") as the token');
   return method.run({ req: request, env, url, base: publicBase(request, env), p, who });
 }
 
@@ -926,6 +1038,7 @@ export default {
       const image = /^\/q\/([0-9]+)\.svg$/.exec(url.pathname);
       if (image) return await signedImage(request, env, image[1], url);
       if (url.pathname.startsWith('/q/')) return notFound();
+      if (url.pathname === '/embed' || url.pathname === '/embed/') return await embedPage(request, env);
       if (url.pathname.startsWith('/api/')) return await api(request, env, url, ctx);
       return env.ASSETS ? env.ASSETS.fetch(request) : notFound();
     } catch (e) {

@@ -1,7 +1,7 @@
 import { toSVG, drawCanvas } from './render.js';
 import { rateAtPrint } from './verify.js';
 import { luminance } from './art.js';
-import { api, store, getToken, setToken, bindSignIn, whoAmI } from './auth.js';
+import { api, store, getToken, setToken, bindSignIn, whoAmI, useMemoryToken } from './auth.js';
 
 const $ = (id) => document.getElementById(id);
 const hexToRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
@@ -540,6 +540,17 @@ async function applyStyleOf(d) {
   }
 }
 
+// /embed#t=<ticket>: sign in with the ticket, held in memory only, and drop it
+// from the address bar.
+const EMBEDDED = /^\/embed\/?$/.test(location.pathname);
+if (EMBEDDED) {
+  useMemoryToken(new URLSearchParams(location.hash.slice(1)).get('t') || '');
+  history.replaceState(null, '', location.pathname);
+  // A parent that reuses its iframe for a new ticket only changes the
+  // fragment, which doesn't reload the page: start over with the new ticket.
+  addEventListener('hashchange', () => location.reload());
+}
+
 const params = new URLSearchParams(location.search);
 const presetText = params.get('text');
 if (presetText) $('text').value = presetText;
@@ -691,44 +702,45 @@ function batchName(template, code) {
   return template.includes('{code}') ? template.replaceAll('{code}', code) : `${template} · ${code}`;
 }
 
-async function runBatch() {
+/**
+ * Make and save one code per link in the look of saved code `from`.
+ * cfg: {codes, from?, nameTemplate?, author?, report?(result)}; each result is
+ * {link, status: "saved"|"existing"|"failed", id?, name?, svg_url?, reliability?, error?}.
+ */
+async function runBatch(cfg) {
   const msg = $('batchMsg');
-  if (!getToken()) {
-    const t = (prompt('Admin or author token (to save the codes):') || '').trim();
-    if (!t) { msg.textContent = 'Sign in with your admin or author token to make the codes.'; return; }
-    setToken(t);
-    applyIdentity();
-  }
+  const report = cfg.report || (() => {});
   $('batchStart').disabled = true;
   $('batchList').replaceChildren();
-  const rows = new Map(batchCodes.map((code) => [code, batchRow(code)]));
+  const rows = new Map(cfg.codes.map((code) => [code, batchRow(code)]));
   const results = [];
-  let failed = 0;
+  const done = (r) => { results.push(r); report(r); };
   try {
     const who = await whoAmI();
-    if (!who) throw new Error('Wrong or missing token. Sign in again with your admin or author token.');
+    if (!who) throw Object.assign(new Error('Wrong or missing token. Sign in again with your admin or author token.'), { status: 401 });
     let from = null;
-    if (batchFrom) {
-      msg.textContent = `Loading saved code ${batchFrom}…`;
-      from = await api('qr.read', { id: batchFrom });
+    if (cfg.from) {
+      msg.textContent = `Loading saved code ${cfg.from}…`;
+      from = await api('qr.read', { id: cfg.from });
       await applyStyleOf(from);
     }
     const tpl = from?.meta || {};
-    const author = who.role === 'author' ? who.author : (linkAuthor ?? from?.author ?? '');
-    const nameTemplate = params.get('name') || from?.name || '';
+    const author = who.role === 'author' ? who.author : (cfg.author ?? from?.author ?? '');
+    const nameTemplate = cfg.nameTemplate || from?.name || '';
     lastSettings = readSettings();
     lastLogo = logoDataUrl();
-    for (const [i, code] of batchCodes.entries()) {
+    for (const [i, code] of cfg.codes.entries()) {
       const row = rows.get(code);
-      msg.textContent = `Making code ${i + 1} of ${batchCodes.length}…`;
+      msg.textContent = `Making code ${i + 1} of ${cfg.codes.length}…`;
       try {
         row.set('Checking the link…');
         const link = await api('link.read', { code });
         const { designs } = await api('qr.read', { link: code, limit: 1 });
         if (designs.length) {
-          results.push([code, designs[0].id]);
-          row.image(designs[0].svg_url);
-          row.set(`Already has a code: "${designs[0].name}" (#${designs[0].id})`, 'ok');
+          const d = designs[0];
+          row.image(d.svg_url);
+          row.set(`Already has a code: "${d.name}" (#${d.id})`, 'ok');
+          done({ link: code, status: 'existing', id: d.id, name: d.name, svg_url: d.svg_url });
           continue;
         }
         row.set('Generating…');
@@ -744,32 +756,55 @@ async function runBatch() {
           meta: metaFor(c),
           image: lastLogo,
         });
-        results.push([code, saved.id]);
         row.image(saved.svg_url);
         row.set(`Saved "${saved.name}" (#${saved.id}), ${pct(c.score.reliability)} scan rate`, 'ok');
+        done({ link: code, status: 'saved', id: saved.id, name: saved.name, svg_url: saved.svg_url, reliability: c.score.reliability });
       } catch (err) {
-        failed++;
-        row.set(err.status === 404 ? 'Not found: not a short link you can use' : err.message, 'bad');
+        const error = err.status === 404 ? 'Not found: not a short link you can use' : err.message;
+        row.set(error, 'bad');
+        done({ link: code, status: 'failed', error });
         if (err.status === 401) throw err;
       }
     }
-    msg.textContent = failed ? `Done, but ${failed} of ${batchCodes.length} failed (see below).` : `Done: ${results.length} code${results.length === 1 ? '' : 's'} ready.`;
+    const failed = results.filter((r) => r.status === 'failed').length;
+    msg.textContent = failed
+      ? `Done, but ${failed} of ${cfg.codes.length} failed (see below).`
+      : `Done: ${results.length} code${results.length === 1 ? '' : 's'} ready.`;
   } catch (err) {
     msg.textContent = err.message;
+    throw err;
   } finally {
     $('batchStart').disabled = false;
   }
-  if (returnTo && results.length) {
+  return results;
+}
+
+/** Full-page batch (?batch=…): runs when the user presses the button. */
+async function startPageBatch() {
+  if (!getToken()) {
+    const t = (prompt('Admin or author token (to save the codes):') || '').trim();
+    if (!t) { $('batchMsg').textContent = 'Sign in with your admin or author token to make the codes.'; return; }
+    setToken(t);
+    applyIdentity();
+  }
+  let results = [];
+  try {
+    results = await runBatch({ codes: batchCodes, from: batchFrom, nameTemplate: params.get('name'), author: linkAuthor });
+  } catch { return; /* shown in the message */ }
+  const ok = results.filter((r) => r.id);
+  if (returnTo && ok.length) {
     // As with a single save: a button the user presses, never an automatic redirect.
     const back = new URL(returnTo);
-    back.searchParams.set('qr_ids', results.map(([code, id]) => `${code}:${id}`).join(','));
+    back.searchParams.set('qr_ids', ok.map((r) => `${r.link}:${r.id}`).join(','));
     const a = Object.assign(document.createElement('a'), { href: back.href, className: 'btnlink primary', textContent: `Return to ${back.host}`, rel: 'noopener noreferrer' });
-    msg.append(' ', a);
+    $('batchMsg').append(' ', a);
     a.focus();
   }
 }
 
-if (params.get('batch')) {
+if (EMBEDDED) {
+  startEmbed();
+} else if (params.get('batch')) {
   $('batchPanel').hidden = false;
   if (!batchValid) {
     $('batchIntro').textContent = `The batch link is invalid: it needs 1–${MAX_BATCH} short codes separated by commas, e.g. ?batch=d,e,f.`;
@@ -778,7 +813,55 @@ if (params.get('batch')) {
     $('batchTitle').textContent = `Make codes for ${batchCodes.length} link${batchCodes.length === 1 ? '' : 's'}`;
     $('batchIntro').textContent = `Makes and saves a branded code for ${batchCodes.length === 1 ? 'link' : 'each of the links'} ${batchCodes.join(', ')}${batchFrom ? `, in the look of saved code #${batchFrom}` : ' with the settings below'}. Links that already have a code are skipped. It takes a few seconds per link; keep this tab open.`;
     $('batchStart').textContent = `Make ${batchCodes.length} code${batchCodes.length === 1 ? '' : 's'}`;
-    $('batchStart').addEventListener('click', runBatch);
+    $('batchStart').addEventListener('click', startPageBatch);
+  }
+}
+
+// ------------------------------------------------------------------ embedded (/embed#t=<ticket>)
+//
+// Framed by another site (only those in the Worker's EMBED_PARENTS may), with a
+// ticket from ticket.create in the URL fragment. It starts at once: the ticket
+// already says which links, template and name, and only that site's server
+// could make it. Results go to the parent window, and only to the origin the
+// ticket names.
+
+async function startEmbed() {
+  document.body.classList.add('embed');
+  $('batchPanel').hidden = false;
+  $('batchStart').hidden = true;
+  let parentOrigin = null;
+  const post = (m) => { if (parentOrigin && window.parent !== window) window.parent.postMessage(m, parentOrigin); };
+  // Tell the parent how tall to make the iframe, whenever the content changes size.
+  let lastHeight = 0;
+  const sendSize = () => {
+    const height = Math.ceil(document.body.getBoundingClientRect().height + 24);
+    if (parentOrigin && height !== lastHeight) { lastHeight = height; post({ type: 'qr-resize', height }); }
+  };
+  new ResizeObserver(sendSize).observe(document.body);
+  let ticket;
+  try {
+    ticket = await api('ticket.read');
+  } catch (err) {
+    $('batchTitle').textContent = 'Can\'t make the codes';
+    $('batchMsg').textContent = err.status === 401 ? 'This link has expired (they last 10 minutes). Close it and start again.' : err.message;
+    // Nothing secret in it, and the parent isn't known without a ticket.
+    if (window.parent !== window) window.parent.postMessage({ type: 'qr-error', error: $('batchMsg').textContent }, '*');
+    return;
+  }
+  parentOrigin = ticket.parent;
+  post({ type: 'qr-ready', links: ticket.links, expires_at: ticket.expires_at });
+  $('batchTitle').textContent = `Making ${ticket.links.length} branded code${ticket.links.length === 1 ? '' : 's'}`;
+  $('batchIntro').textContent = `For ${ticket.links.join(', ')}${ticket.from ? `, in the look of saved code #${ticket.from}` : ''}. A few seconds per code; keep this open.`;
+  requestAnimationFrame(sendSize);
+  try {
+    const results = await runBatch({
+      codes: ticket.links, from: ticket.from, nameTemplate: ticket.name,
+      report: (r) => { post({ type: 'qr-progress', ...r }); requestAnimationFrame(sendSize); },
+    });
+    post({ type: 'qr-done', results });
+    requestAnimationFrame(sendSize);
+  } catch (err) {
+    post({ type: 'qr-error', error: err.message });
   }
 }
 

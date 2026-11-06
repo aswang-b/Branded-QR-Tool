@@ -176,6 +176,25 @@ export const METHOD_DOCS = {
     returns: '{deleted: name}.',
     example: { name: 'alex@example.com' },
   },
+  'ticket.create': {
+    summary: 'Embed the generator in your site: a 10-minute ticket for /embed that makes and saves one branded code per link, then posts the results to your page. Call it from your server; put only the returned url in the browser.',
+    params: [
+      param('links', 'string[] | string', true, `1–25 short codes (or "d,e,f") of links the ticket's author owns, e.g. the new door-sign links.`),
+      param('parent', 'string', true, 'Origin of the page that frames the generator, e.g. "https://dancewithb.fun". Must be one of the Worker\'s EMBED_PARENTS; results are posted only to this origin.'),
+      param('from', 'number', false, 'A saved code of the same author to copy the look from (settings, logo and variant). Without it, the generator\'s default settings and logo.'),
+      param('name', 'string', false, 'Name for the saved codes, up to 100 characters; {code} is replaced by the short code (without it " · <code>" is appended). Default: the from code\'s name.'),
+      param('author', 'string', false, 'Admin only: the author the ticket acts as (default none). An author token\'s ticket is always its own.'),
+    ],
+    returns: '{url, links, from, name, parent, author, expires_at} (status 201). Load url (…/embed#t=qrt_…) in an <iframe> on parent. The iframe starts at once, skips links that already have a code, and posts {type: "qr-progress"|"qr-done"|"qr-error"|"qr-resize", …} messages to parent.',
+    notes: 'The ticket ("qrt_…") is a short-lived token acting as its author, but it can only read its links and the from code and save one code per link (409 for a link that already has one). Anything else is 403.',
+    example: { links: ['d', 'e'], from: 12, name: 'Door sign {code}', parent: 'https://dancewithb.fun' },
+  },
+  'ticket.read': {
+    summary: 'Used by /embed: what the calling ticket covers.',
+    params: [],
+    returns: '{author, links, from, name, parent, expires_at}. Only with a ticket as the token (400 otherwise).',
+    example: {},
+  },
   'spec.read': {
     summary: 'This specification, as JSON.',
     params: [],

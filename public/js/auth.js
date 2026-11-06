@@ -10,7 +10,12 @@ const KEY = 'adminToken';
 const NAME_KEY = 'signedInAs';
 export const store = (area) => { try { return window[area]; } catch { return null; } };
 
-export const getToken = () => store('sessionStorage')?.getItem(KEY) || store('localStorage')?.getItem(KEY) || '';
+// A token held only in memory (the /embed page's ticket): never stored, and
+// it works where an iframe has no storage (Safari blocks it for third parties).
+let memoryToken = null;
+export const useMemoryToken = (token) => { memoryToken = token || null; };
+
+export const getToken = () => memoryToken || store('sessionStorage')?.getItem(KEY) || store('localStorage')?.getItem(KEY) || '';
 export const isRemembered = () => !!store('localStorage')?.getItem(KEY);
 
 /** Who signed in ("admin" or an author name), or '' if not known yet. */
@@ -48,6 +53,7 @@ export function whoAmI() {
 }
 
 export function clearToken() {
+  memoryToken = null;
   for (const area of ['sessionStorage', 'localStorage']) {
     store(area)?.removeItem(KEY);
     store(area)?.removeItem(NAME_KEY);

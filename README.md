@@ -150,6 +150,8 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 | `author.read` | `include_tokens?` | `{authors: […]}` (tokens only when asked) | admin |
 | `author.update` | `name`, `new_name?`, `rotate_token?`, `adopt_existing?` | the author | admin |
 | `author.delete` | `name` | `{deleted}` | admin |
+| `ticket.create` | `links`, `parent`, `from?`, `name?`, `author?` (admin) | `{url, …}`: a 10-minute `/embed` ticket (201) | admin, author |
+| `ticket.read` | | what the calling ticket covers (used by `/embed`) | ticket |
 | `spec.read` | | the specification (for an author: what their token can call) | admin, author |
 
 **Tokens.** `ADMIN_TOKEN` is a Wrangler secret and can do everything. **Author tokens** (`qra_…`) are
@@ -196,6 +198,14 @@ that was already generated). Other projects use them through the API with their 
   generator fills those in (saying the author came from the link), and after Save shows a
   "Return to <host>" button that goes back to `return` with `?qr_id=<id>`
   added (https only, or a localhost dev server).
+- **Embed the generator in your site:** your server calls
+  `ticket.create {links: ["d", "e"], from: <saved code id>, name: "Door sign {code}", parent: "https://dancewithb.fun"}`
+  and puts the returned `url` (`…/embed#t=qrt_…`) in an `<iframe>` on `parent`. The page starts at
+  once (no settings, no sign-in), makes and saves one code per link like batch mode below, and posts
+  `{type: "qr-ready" | "qr-progress" | "qr-done" | "qr-error" | "qr-resize", …}` to the parent; check
+  `event.origin === "https://qr.dancewithb.fun"`. The ticket lasts 10 minutes and can only read its
+  links and the `from` code and save one code per link. Only origins in `EMBED_PARENTS`
+  (`wrangler.jsonc`) may frame `/embed` or be a ticket's `parent`.
 - **Make codes for many links at once (batch):** open
   `https://qr.dancewithb.fun/?batch=d,e,f&from=<saved code id>&name=Door%20sign%20{code}&return=<https url>`.
   After the admin presses **Make N codes**, it makes and saves one code per short link (up to 25) in
@@ -244,7 +254,7 @@ Worker redirects (HTTP 302) to wherever that code currently points.
 
 ## Deploy to Cloudflare (free)
 
-`wrangler.jsonc` runs the Worker only for `/c/*`, `/q/*` and `/api/*`; everything else is served from
+`wrangler.jsonc` runs the Worker only for `/c/*`, `/q/*`, `/api/*` and `/embed`; everything else is served from
 static assets without invoking the Worker.
 
 ```sh

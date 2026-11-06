@@ -15,7 +15,7 @@
     "binding": "ASSETS",
     // The Worker only runs for short links, signed images and the API; the site itself is
     // served straight from static assets (free, no Worker invocation).
-    "run_worker_first": ["/c/*", "/q/*", "/api/*"]
+    "run_worker_first": ["/c/*", "/q/*", "/api/*", "/embed", "/embed/"]
   },
   "d1_databases": [
     // No database_id: `wrangler deploy` creates and binds the database for you.
@@ -29,6 +29,8 @@
     // The permanent public origin that goes into printed QR codes, e.g.
     // "https://qr.dancewithb.fun". Leave empty to use whichever origin you
     // create links from.
-    "PUBLIC_BASE_URL": "https://qr.dancewithb.fun"
+    "PUBLIC_BASE_URL": "https://qr.dancewithb.fun",
+    // Sites allowed to frame the generator at /embed (space-separated origins).
+    "EMBED_PARENTS": "https://dancewithb.fun http://localhost:4321"
   }
 }

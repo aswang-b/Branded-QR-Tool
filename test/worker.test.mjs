@@ -499,7 +499,7 @@ test('spec.read: the API specification, admin only, covering every method', asyn
   const spec = await (await call('/api/spec.read', { headers: auth })).json(); // GET works too
   const names = spec.methods.map((m) => m.name);
   assert.deepEqual(names, ['link.create', 'link.read', 'link.update', 'link.delete', 'qr.create', 'qr.read', 'qr.update', 'qr.delete',
-    'author.create', 'author.read', 'author.update', 'author.delete', 'spec.read']);
+    'author.create', 'author.read', 'author.update', 'author.delete', 'ticket.create', 'ticket.read', 'spec.read']);
   for (const m of spec.methods) {
     assert.ok(m.summary && m.returns && Array.isArray(m.params), `${m.name} is documented`);
     assert.ok(m.params.every((p) => p.name && p.type && p.desc), `${m.name} params are documented`);
@@ -623,7 +623,7 @@ test('spec.read for an author: the guide to what their token can call', async ()
   const spec = await (await rpc('spec.read', {}, k)).json();
   assert.deepEqual(spec.viewer, { role: 'author', author: 'guide-reader' });
   assert.deepEqual(spec.methods.map((m) => m.name),
-    ['link.create', 'link.read', 'link.update', 'qr.create', 'qr.read', 'qr.update', 'qr.delete', 'spec.read']);
+    ['link.create', 'link.read', 'link.update', 'qr.create', 'qr.read', 'qr.update', 'qr.delete', 'ticket.create', 'ticket.read', 'spec.read']);
   assert.ok(spec.methods.every((m) => m.roles.includes('author') && m.summary && m.params));
   assert.deepEqual(Object.keys(spec.roles), ['author']);
   assert.deepEqual(Object.keys(spec.objects), ['link', 'design']); // nothing about managing authors
@@ -631,7 +631,7 @@ test('spec.read for an author: the guide to what their token can call', async ()
   assert.ok(!JSON.stringify(spec).includes(k.Authorization.slice(7))); // ...but never contains a token
   const admin = await (await rpc('spec.read')).json();
   assert.deepEqual(admin.viewer, { role: 'admin' });
-  assert.equal(admin.methods.length, 13);
+  assert.equal(admin.methods.length, 15);
   await expectStatus(await rpc('spec.read', {}, { Authorization: 'Bearer qra_nope' }), 401);
 });
 
@@ -748,4 +748,72 @@ test('qr.read: filter by link, and signed image links that need no token', async
   const fresh = await (await rpc('qr.read', { id: d1.id })).json();
   assert.notEqual(fresh.svg_url, d1.svg_url);
   await expectStatus(await fetch(fresh.svg_url), 200);
+});
+
+// ---------------------------------------------------------------- embedding: ticket.create, /embed
+
+test('ticket.create: an embed ticket covering only its links, template and one code per link', async () => {
+  const k = await authorKey('embed-user');
+  const [l1, l2] = await Promise.all([1, 2].map(async (i) => (await rpc('link.create', { url: `https://dancewithb.fun/check-in?sign=${i}` }, k)).json()));
+  const other = await (await rpc('link.create', { url: 'https://example.com/not-theirs' })).json();
+  const tpl = await (await rpc('qr.create', { name: 'Template', text: 'x', svg: SVG }, k)).json();
+  const someoneElses = await (await rpc('qr.create', { name: 'Not theirs', text: 'x', svg: SVG })).json();
+
+  const bad = [
+    { links: [l1.code] }, // no parent
+    { links: [l1.code], parent: 'https://evil.example' },
+    { links: [], parent: 'https://dancewithb.fun' },
+    { links: 'a-b', parent: 'https://dancewithb.fun' },
+    { links: Array.from({ length: 26 }, (_, i) => String.fromCharCode(97 + (i % 26)) + 'a'), parent: 'https://dancewithb.fun' },
+  ];
+  for (const p of bad) await expectStatus(await rpc('ticket.create', p, k), 400, JSON.stringify(p).slice(0, 60));
+  await expectStatus(await rpc('ticket.create', { links: [l1.code, other.code], parent: 'https://dancewithb.fun' }, k), 404); // not its link
+  await expectStatus(await rpc('ticket.create', { links: [l1.code], from: someoneElses.id, parent: 'https://dancewithb.fun' }, k), 404);
+
+  const r = await rpc('ticket.create', { links: `${l1.code},${l2.code}`, from: tpl.id, name: 'Door sign {code}', parent: 'https://dancewithb.fun/admin/qr' }, k);
+  assert.equal(r.status, 201);
+  const made = await r.json();
+  assert.equal(made.parent, 'https://dancewithb.fun');
+  assert.deepEqual(made.links, [l1.code, l2.code]);
+  assert.ok(made.expires_at - Date.now() / 1000 > 500);
+  assert.ok(made.url.startsWith(`${w.base}/embed#t=qrt_`));
+  const T = { Authorization: `Bearer ${new URL(made.url).hash.slice(3)}` };
+
+  // what the embed page needs
+  assert.deepEqual(await (await rpc('ticket.read', {}, T)).json(),
+    { author: 'embed-user', links: [l1.code, l2.code], from: tpl.id, name: 'Door sign {code}', parent: 'https://dancewithb.fun', expires_at: made.expires_at });
+  assert.equal((await (await rpc('spec.read', {}, T)).json()).viewer.author, 'embed-user');
+  await expectStatus(await rpc('link.read', { code: l1.code }, T), 200);
+  await expectStatus(await rpc('qr.read', { id: tpl.id }, T), 200);
+  await expectStatus(await rpc('qr.read', { link: l2.code }, T), 200);
+  // ...and nothing more
+  await expectStatus(await rpc('link.read', {}, T), 403); // the author's whole list
+  await expectStatus(await rpc('qr.read', {}, T), 403);
+  await expectStatus(await rpc('link.read', { code: other.code }, T), 403);
+  for (const [m, p] of [['link.update', { code: l1.code, url: 'https://phish.example/' }], ['link.create', { url: 'https://x.example/' }], ['qr.delete', { id: tpl.id }],
+    ['qr.update', { id: tpl.id, name: 'x' }], ['ticket.create', { links: [l1.code], parent: 'https://dancewithb.fun' }]]) {
+    await expectStatus(await rpc(m, p, T), 403, m);
+  }
+  await expectStatus(await rpc('qr.create', { name: 'x', text: `${w.base}/c/${other.code}`, svg: SVG }, T), 403);
+  await expectStatus(await rpc('qr.create', { name: 'x', text: 'not a link', svg: SVG }, T), 403);
+  // one code per link
+  const saved = await rpc('qr.create', { name: 'Door sign', text: `${l1.short}#abc`, svg: SVG }, T);
+  assert.equal(saved.status, 201);
+  assert.equal((await saved.json()).author, 'embed-user');
+  await expectStatus(await rpc('qr.create', { name: 'Again', text: l1.short, svg: SVG }, T), 409);
+  // a ticket isn't an author token, and ticket.read needs one
+  await expectStatus(await rpc('ticket.read', {}, k), 400);
+  await expectStatus(await rpc('ticket.read', {}, { Authorization: 'Bearer qrt_' + 'A'.repeat(43) }), 401);
+});
+
+test('/embed: the generator page, frameable only by EMBED_PARENTS', async () => {
+  const r = await call('/embed');
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('content-security-policy'), /^frame-ancestors https:\/\/dancewithb\.fun http:\/\/localhost:4321$/);
+  assert.equal(r.headers.get('referrer-policy'), 'no-referrer');
+  assert.match(await r.text(), /id="batchPanel"/);
+  // the normal site stays as it was
+  const home = await call('/');
+  assert.equal(home.headers.get('content-security-policy'), null);
+  await home.arrayBuffer();
 });

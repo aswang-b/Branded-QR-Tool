@@ -215,3 +215,8 @@ input[type="number"], input[type="password"] {
 .batch-list .state { color: var(--muted); }
 .batch-list .state.ok { color: var(--ok); }
 .batch-list .state.bad { color: var(--bad); }
+
+/* Embedded (/embed): only the batch panel, no page chrome */
+body.embed > header, body.embed > main, body.embed > footer { display: none; }
+body.embed { padding: 12px; }
+body.embed .batch { margin: 0; max-width: none; }
