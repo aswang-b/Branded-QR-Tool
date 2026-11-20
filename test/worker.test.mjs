@@ -915,3 +915,135 @@ test('ticket.create replace: remakes a link that has a code, once, then removes 
   await expectStatus(await rpc('qr.create', { name: 'again', text: l.short, svg: SVG }, T), 409);
   assert.deepEqual((await (await rpc('qr.read', { link: l.code }, k)).json()).designs.map((d) => d.id), [made.id]);
 });
+
+// ---------------------------------------------------------------- an author's own short address (short_base)
+
+/** Scans recorded for a link (hits are written just after the response). */
+async function hitsOf(code) {
+  await new Promise((r) => setTimeout(r, 300));
+  return (await (await rpc('link.read', { code })).json()).hits;
+}
+
+test("short_base: the admin sets an author's own short address, and only that author's codes print it", async () => {
+  const k = await authorKey('site-owner');
+  const other = await authorKey('site-other');
+  for (const short_base of ['http://site.example', 'https://site.example/c', 'https://site.example/a/', 'https://site.example?x=1', 'https://site.example?',
+    'https://site.example#', 'https://site.example:8443', 'https://user@site.example', 'ftp://site.example', 'site.example', 'https://', 'https://a b.example', 42, true, {}]) {
+    await expectStatus(await rpc('author.update', { name: 'site-owner', short_base }), 400, JSON.stringify(short_base));
+    await expectStatus(await rpc('author.create', { name: 'site-bad', short_base }), 400, JSON.stringify(short_base));
+  }
+  // normalised: lower-case host, no trailing slash
+  let r = await rpc('author.update', { name: 'site-owner', short_base: ' https://Site.Example/ ' });
+  assert.equal(r.status, 200);
+  assert.equal((await r.json()).short_base, 'https://site.example');
+  assert.equal((await (await rpc('author.read', { name: 'site-owner' })).json()).short_base, 'https://site.example');
+  assert.equal((await (await rpc('author.read')).json()).authors.find((a) => a.name === 'site-other').short_base, null);
+  const fourth = await (await rpc('author.create', { name: 'site-fourth', short_base: 'https://fourth.example' })).json();
+  assert.equal(fourth.short_base, 'https://fourth.example');
+  // one author per address
+  await expectStatus(await rpc('author.update', { name: 'site-other', short_base: 'https://SITE.example' }), 409);
+  await expectStatus(await rpc('author.create', { name: 'site-third', short_base: 'https://site.example' }), 409);
+  // an author token can't set it, for itself or anyone
+  await expectStatus(await rpc('author.update', { name: 'site-owner', short_base: 'https://evil.example' }, k), 403);
+  await expectStatus(await rpc('author.update', { name: 'site-other', short_base: 'https://evil.example' }, other), 403);
+  await expectStatus(await rpc('author.create', { name: 'site-sneaky', short_base: 'https://evil.example' }, k), 403);
+  assert.equal((await (await rpc('author.read', { name: 'site-owner' })).json()).short_base, 'https://site.example');
+
+  // the owner's links print it; another author's and unowned links print this site's address
+  const mine = await (await rpc('link.create', { url: 'https://example.com/mine' }, k)).json();
+  assert.equal(mine.short, `https://site.example/c/${mine.code}`);
+  const theirs = await (await rpc('link.create', { url: 'https://example.com/theirs' }, other)).json();
+  assert.equal(theirs.short, `${w.base}/c/${theirs.code}`);
+  const unowned = await (await rpc('link.create', { url: 'https://example.com/unowned' })).json();
+  assert.equal(unowned.short, `${w.base}/c/${unowned.code}`);
+  assert.equal((await (await rpc('link.read', { code: mine.code })).json()).short, mine.short);
+  assert.ok((await (await rpc('link.read', {}, k)).json()).links.every((l) => l.short.startsWith('https://site.example/c/')));
+  const updated = await (await rpc('link.update', { code: mine.code, label: 'renamed' }, k)).json();
+  assert.equal(updated.short, mine.short);
+
+  // a design encoding the owner's own-site link is tied to it, and so is one with this site's address
+  const d1 = await (await rpc('qr.create', { name: 'own site', text: `${mine.short}#xyz`, svg: SVG }, k)).json();
+  assert.deepEqual(d1.link, { code: mine.code, short: mine.short, url: 'https://example.com/mine' });
+  const d2 = await (await rpc('qr.create', { name: 'old address', text: `${w.base}/c/${mine.code}`, svg: SVG }, k)).json();
+  assert.equal(d2.link.short, mine.short);
+  const d3 = await (await rpc('qr.create', { name: 'theirs', text: theirs.short, svg: SVG }, other)).json();
+  assert.equal(d3.link.short, theirs.short);
+  const listed = (await (await rpc('qr.read', { link: mine.code }, k)).json()).designs;
+  assert.deepEqual(listed.map((d) => d.link.short), [mine.short, mine.short]);
+  assert.equal((await (await rpc('qr.read', { id: d1.id })).json()).link.short, mine.short);
+  // the owner's site address doesn't reach anyone else's links (that site won't serve them)
+  assert.equal((await (await rpc('qr.create', { name: 'x', text: `https://site.example/c/${theirs.code}`, svg: SVG })).json()).link, null);
+  assert.equal((await (await rpc('qr.create', { name: 'x', text: `https://site.example/c/${unowned.code}`, svg: SVG })).json()).link, null);
+  assert.equal((await (await rpc('qr.create', { name: 'x', text: `https://fourth.example/c/${mine.code}`, svg: SVG }, k)).json()).link, null);
+
+  // an embed ticket saves codes that encode the own-site address
+  const t = await (await rpc('ticket.create', { links: [mine.code], parent: 'https://dancewithb.fun', replace: true }, k)).json();
+  const T = { Authorization: `Bearer ${new URL(t.url).hash.slice(3)}` };
+  assert.equal((await (await rpc('link.read', { code: mine.code }, T)).json()).short, mine.short);
+  r = await rpc('qr.create', { name: 'x', text: `${mine.short}#t`, svg: SVG }, T);
+  assert.equal(r.status, 201);
+  assert.equal((await r.json()).link.code, mine.code);
+
+  // "" and null both go back to this site's address; changing only short_base leaves tickets alone
+  assert.equal((await (await rpc('author.update', { name: 'site-owner', short_base: '' })).json()).short_base, null);
+  assert.equal((await (await rpc('link.read', { code: mine.code })).json()).short, `${w.base}/c/${mine.code}`);
+  await expectStatus(await rpc('ticket.read', {}, T), 200);
+  await expectStatus(await rpc('author.update', { name: 'site-owner', short_base: 'https://site.example' }), 200);
+  assert.equal((await (await rpc('author.update', { name: 'site-owner', short_base: null })).json()).short_base, null);
+  await expectStatus(await rpc('author.update', { name: 'site-owner' }), 400); // still nothing to update
+  // renaming keeps it
+  await expectStatus(await rpc('author.update', { name: 'site-fourth', new_name: 'site-fourth-renamed' }), 200);
+  assert.equal((await (await rpc('author.read', { name: 'site-fourth-renamed' })).json()).short_base, 'https://fourth.example');
+});
+
+test("short_base: a site asking with X-Short-Link-Host only gets its own author's links", async () => {
+  const k = await authorKey('via-owner');
+  const plainKey = await authorKey('via-plain');
+  await expectStatus(await rpc('author.update', { name: 'via-owner', short_base: 'https://via.example' }), 200);
+  const own = await (await rpc('link.create', { url: 'https://example.com/via-own' }, k)).json();
+  const plain = await (await rpc('link.create', { url: 'https://example.com/via-plain' }, plainKey)).json();
+  const unowned = await (await rpc('link.create', { url: 'https://example.com/via-unowned' })).json();
+  const go = (code, host, method = 'GET') => call(`/c/${code}`, { method, headers: host === undefined ? {} : { 'X-Short-Link-Host': host } });
+
+  // the matching host (any case): 302, counted on GET and not on HEAD
+  let r = await go(own.code, 'VIA.example');
+  assert.equal(r.status, 302);
+  assert.equal(r.headers.get('Location'), 'https://example.com/via-own#');
+  await r.arrayBuffer();
+  await expectStatus(await go(own.code.toUpperCase(), 'via.example', 'HEAD'), 302);
+  assert.equal(await hitsOf(own.code), 1);
+
+  // another host, or a host for an author without short_base: like an unknown code, and not counted
+  const host = new URL(w.base).host;
+  for (const [code, via] of [[own.code, 'other.example'], [own.code, ''], [own.code, 'via.example.evil'], [own.code, host], [plain.code, 'via.example'], [plain.code, host], [unowned.code, 'via.example'], ['zzzz', 'via.example']]) {
+    await expectStatus(await go(code, via), 404, `${code} via ${via}`);
+    await expectStatus(await go(code, via, 'HEAD'), 404, `HEAD ${code} via ${via}`);
+  }
+  assert.equal(await hitsOf(own.code), 1);
+  assert.equal(await hitsOf(plain.code), 0);
+  assert.equal(await hitsOf(unowned.code), 0);
+
+  // without the header nothing changes: every author's codes printed with this site's address keep working
+  for (const l of [own, plain, unowned]) {
+    r = await go(l.code);
+    assert.equal(r.status, 302);
+    assert.equal(r.headers.get('Location'), `${l.url}#`);
+    await r.arrayBuffer();
+  }
+  assert.equal(await hitsOf(own.code), 2);
+  assert.equal(await hitsOf(plain.code), 1);
+});
+
+test("short_base: a destination may not loop back to an author's own short address", async () => {
+  const k = await authorKey('loop-owner');
+  await expectStatus(await rpc('author.update', { name: 'loop-owner', short_base: 'https://loop.example' }), 200);
+  const other = await authorKey('loop-other');
+  const link = await (await rpc('link.create', { url: 'https://example.com/loop' }, other)).json();
+  for (const url of ['https://loop.example/c/x', 'https://LOOP.example/C/abc', 'http://loop.example/c/', 'https://loop.example/c']) {
+    await expectStatus(await rpc('link.create', { url }), 400, url);
+    await expectStatus(await rpc('link.create', { url }, k), 400, url);
+    await expectStatus(await rpc('link.create', { url }, other), 400, url); // not only for the owner
+    await expectStatus(await rpc('link.update', { code: link.code, url }, other), 400, url);
+  }
+  await expectStatus(await rpc('link.create', { url: 'https://loop.example/check-in' }, k), 201);
+});

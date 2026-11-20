@@ -39,10 +39,11 @@
 
     <section class="panel">
       <div class="row between"><h2>Authorized authors</h2><button type="button" class="small" id="refresh">Refresh</button></div>
+      <p class="hint"><strong>Short address:</strong> empty, codes print this site's <code>/c/&lt;code&gt;</code>. Set it to an author's own site (e.g. <code>https://dancewithb.fun</code>) and their codes print <code>https://dancewithb.fun/c/&lt;code&gt;</code> instead. Set it only once that site serves <code>/c/&lt;code&gt;</code> by asking this site for <code>/c/&lt;code&gt;</code> with the header <code>X-Short-Link-Host: &lt;its host&gt;</code> (see README, <em>Short links on your own site</em>). Codes printed with this site's address keep working either way.</p>
       <p id="msg" class="status" role="status" aria-live="polite"></p>
       <div class="table-wrap">
         <table id="table" hidden>
-          <thead><tr><th>Author</th><th>Token</th><th>Owns</th><th>Last used</th><th></th></tr></thead>
+          <thead><tr><th>Author</th><th>Token</th><th>Owns</th><th>Short address</th><th>Last used</th><th></th></tr></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>

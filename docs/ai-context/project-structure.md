@@ -66,7 +66,7 @@ Branded QR/
 
 | Path | Handled by |
 |------|-----------|
-| `/c/<code>` | `redirect()`: 302 to the destination, counts the scan |
+| `/c/<code>` | `redirect()`: 302 to the destination, counts the scan (with `X-Short-Link-Host`: only the matching author's links) |
 | `/q/<id>.svg?sig=…` | `signedImage()`: a saved SVG for `<img>` tags, no token |
 | `/embed` (`/embed/` → 308) | `embedPage()`: index.html, framable only by `EMBED_PARENTS` |
 | `/api/<method>` | `api()`: auth, role check, body parsing, then the `METHODS` handler |
@@ -78,7 +78,7 @@ Branded QR/
 |-------|-------|
 | `links` | short links: url, label, author, client_key, hits, last_hit, timestamps |
 | `designs` | saved codes: name, details, author, text, link_id, svg, meta (JSON), image (PNG data URL) |
-| `authors` | name, token, token_hash (lookup), created_at, last_used |
+| `authors` | name, token, token_hash (lookup), created_at, last_used, short_base (own short-link origin) |
 | `link_hits` | scans per link per 15-minute slot |
 | `link_hits_hourly` | legacy hourly scan counts (still read by stats, pruned) |
 | `tickets` | embed tickets by hash: author, links, from_id, name, parent, created_at, expires_at |

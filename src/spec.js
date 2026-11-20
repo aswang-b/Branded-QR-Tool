@@ -7,7 +7,7 @@ const param = (name, type, required, desc) => ({ name, type, required, desc });
 
 const LINK = {
   code: 'string: short code, e.g. "a" (a–z then 0–9; never reused)',
-  short: 'string: full short URL that goes in a QR code, e.g. https://qr.dancewithb.fun/c/a',
+  short: 'string: full short URL that goes in a QR code, e.g. https://qr.dancewithb.fun/c/a; on the author\'s own site instead (their short_base, e.g. https://dancewithb.fun/c/a) when the admin set one',
   url: 'string: current destination',
   label: 'string',
   author: 'string: whose link this is ("" when none); author tokens only reach their own',
@@ -38,12 +38,14 @@ const AUTHOR = {
   token: 'string: their API token ("qra_…"); returned by author.create/update, author.read {name}, and author.read {include_tokens: true}',
   created_at: 'number: Unix seconds',
   last_used: 'number | null: Unix seconds the token was last used',
+  short_base: 'string | null: the author\'s own short-link address (an origin), or null for this site\'s. Their links\' short URLs (and designs\' link.short) use it',
   codes: 'number: saved codes with this author',
   links: 'number: short links with this author',
 };
 
 // An author token is always limited to its own author; the admin may filter by one.
 const AUTHOR_SCOPE = param('author', 'string', false, 'Author token: not needed (always its own author; a different one is refused with 403). Admin: optional filter.');
+const SHORT_BASE = param('short_base', 'string | null', false, 'Admin only: the origin of the author\'s own site, e.g. "https://dancewithb.fun" (https, no path, query, port or #; a trailing slash is dropped), so their links print as https://dancewithb.fun/c/<code>. That site must serve /c/<code> by calling GET (counts the scan) or HEAD (doesn\'t) on this Worker\'s /c/<code> with redirect: manual and the header X-Short-Link-Host: <its host>, passing on the 302; with that header only this author\'s links redirect, anything else is 404. One author per address (409 if taken). "" or null: back to this site\'s address. Codes printed on an old short_base stop working when it changes; codes printed on this site\'s address always keep working.');
 const ADOPT = param('adopt_existing', 'boolean', false, 'Codes or links already labelled with this name (e.g. left by a revoked author) are refused with 409 unless this is true, which hands them to this author\'s token.');
 
 export const METHOD_DOCS = {
@@ -145,8 +147,8 @@ export const METHOD_DOCS = {
   },
   'author.create': {
     summary: 'Authorize an author: creates their API token, limited to their own saved codes.',
-    params: [param('name', 'string', true, 'The author, 1–200 characters, exactly as on their saved codes (e.g. an email or project name). Must be unique.'), ADOPT],
-    returns: 'The author, including the token (status 201; 409 if the name exists or is already on codes/links without adopt_existing).',
+    params: [param('name', 'string', true, 'The author, 1–200 characters, exactly as on their saved codes (e.g. an email or project name). Must be unique.'), ADOPT, SHORT_BASE],
+    returns: 'The author, including the token and short_base (status 201; 409 if the name exists, is already on codes/links without adopt_existing, or short_base is another author\'s).',
     example: { name: 'alex@example.com' },
   },
   'author.read': {
@@ -159,15 +161,16 @@ export const METHOD_DOCS = {
     example: { name: 'alex@example.com' },
   },
   'author.update': {
-    summary: 'Rename an author (their saved codes move with them) and/or rotate their token.',
+    summary: 'Rename an author (their saved codes move with them), rotate their token, and/or set their own short-link address.',
     params: [
       param('name', 'string', true, 'The author to change.'),
       param('new_name', 'string', false, 'New name; their saved codes and links are relabelled to match.'),
       param('rotate_token', 'boolean', false, 'true: issue a new token. The old one stops working at once.'),
       ADOPT,
+      SHORT_BASE,
     ],
     returns: 'The updated author, including the (new) token.',
-    notes: 'Send new_name and/or rotate_token: true.',
+    notes: 'Send new_name, rotate_token: true and/or short_base. Renaming or rotating revokes the author\'s embed tickets; changing only short_base does not.',
     example: { name: 'alex@example.com', rotate_token: true },
   },
   'author.delete': {
@@ -211,7 +214,7 @@ export const ERRORS = [
   { status: 403, meaning: 'The token is valid but may not do this (e.g. an author token calling link.delete, naming another author, or setting new_author).' },
   { status: 404, meaning: 'Unknown method, or nothing with that code/id/name (for an author token, also another author\'s code).' },
   { status: 405, meaning: 'Wrong HTTP verb: writes are POST only; reads take GET or POST.' },
-  { status: 409, meaning: 'link.update with if_url, but the link was changed meanwhile, or link.create with a key whose link has a different url or label (the body includes the current link); or two authors being merged have links with the same key; or an author with that name already exists, or codes/links already carry the name (send adopt_existing: true).' },
+  { status: 409, meaning: 'link.update with if_url, but the link was changed meanwhile, or link.create with a key whose link has a different url or label (the body includes the current link); or two authors being merged have links with the same key; or an author with that name already exists, or codes/links already carry the name (send adopt_existing: true); or another author already has that short_base.' },
   { status: 413, meaning: 'Request body too large.' },
   { status: 503, meaning: 'ADMIN_TOKEN is not configured: the API refuses everything.' },
 ];

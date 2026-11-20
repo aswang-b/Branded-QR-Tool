@@ -21,7 +21,7 @@ Static pages never reach it (see `run_worker_first` in `wrangler.jsonc`).
 3. `encodeId` / `decodeCode`: bijective base 36 over `a-z0-9`.
 4. Helpers: `json`, `safeEqual` (constant time), `authorize`, `readJson`, `HttpError`.
 5. Parsers: `parseDestination`, `parseLabel`, `parseText`, `parseSvg` (allowlist), `parseImage`,
-   `parseMeta`, `parseKey`, `parseBool`, `linkIdFor`.
+   `parseMeta`, `parseKey`, `parseBool`, `parseShortBase`, `shortLinkIn`.
 6. `ensureSchema()`: additive, runs once per isolate, retried if it fails.
 7. `present` / `presentDesign` / `presentAuthor`: the only shapes sent out.
 8. Routes: `redirect`, `signedImage`, then the API handlers, then `METHODS` and `api()`.
@@ -38,6 +38,19 @@ Static pages never reach it (see `run_worker_first` in `wrangler.jsonc`).
   - `ownerFor(p, who)`: who a new row belongs to.
   - `designLinkId(env, text, req, who)`: the `link_id` for a design. For authors, only their own links.
   - `presentDesign(..., {who})`: nulls `link.url` when the viewer is an author who doesn't own the link.
+
+## Author short addresses (`authors.short_base`)
+
+- An origin (`https://host`, see `parseShortBase`), set by the admin with `author.create` /
+  `author.update {short_base}` (`""`/null clears). One author per address (partial unique index).
+- `api()` passes `loadBases()`: the authors map, read at most once per request. `present` /
+  `presentDesign` take it and print `shortUrl()`; `shortLinkHosts()` adds its hosts to the
+  loop-back guard.
+- `redirect()` reads `url` and the author's `short_base` in one joined query. With
+  `X-Short-Link-Host`, a host that isn't the link's author's `short_base` host → 404, uncounted.
+- `designLinkId()` (also used by `checkTicket`) accepts this Worker's hosts, or the `short_base`
+  host of the link's own author.
+- Changing only `short_base` keeps the author's tickets; codes printed on an old address stop.
 
 ## Embed tickets (`ticket.*`, `/embed`)
 
@@ -93,6 +106,7 @@ Static pages never reach it (see `run_worker_first` in `wrangler.jsonc`).
 - `author.*` and `adopt_existing`: rows already carrying a name aren't handed to a new token
   without consent.
 - Image signatures change when the author's token rotates or `ADMIN_TOKEN` changes.
+- `/c/<code>` without `X-Short-Link-Host` redirects every author's links, as before `short_base`.
 
 ## Pitfalls
 

@@ -60,7 +60,13 @@ and `spec.js` reads that table, so docs and enforcement can't drift. Full table:
   and the test `every SVG the generator writes passes the save-time allowlist`.
 - `/q/<id>.svg?sig=` image links are HMAC-signed with `ADMIN_TOKEN` over the id + the author's
   token hash, so rotating a token revokes them. Missing and bad-signature cases both return 404.
-- Destinations must be http(s) and must not point back at our own `/c/` links.
+- Destinations must be http(s) and must not point back at our own `/c/` links, on this Worker's hosts
+  or any author's `short_base` (`shortLinkHosts`).
+- **Short links on an author's own site (`authors.short_base`):** admin-only to set (`author.*`).
+  - `redirect()` with `X-Short-Link-Host` serves a link only when its author's `short_base` has that
+    host; anything else is a 404 like an unknown code, uncounted. Without the header, unchanged.
+  - One author per address (unique index), so a site never serves another author's links.
+  - `designLinkId()` ties a design to a link on a `short_base` host only if it is that link's author's.
 - Browser code builds DOM with `textContent`; never put API data into `innerHTML`.
 - The generator's `?return=` link is never followed automatically: after Save the user presses
   "Return to <host>". `?author=` is shown as coming from the link and never saved as the default.
@@ -84,6 +90,8 @@ and `spec.js` reads that table, so docs and enforcement can't drift. Full table:
   per-day stats in any time zone. `link_hits_hourly` is legacy, read-only except for pruning.
   About 1 in `PRUNE_EVERY` scans deletes that link's slots older than ~402 days.
 - `link.create {key}` is idempotent per author. A repeat key with a different url or label → 409.
+- A link's `short` (and a design's `link.short`) is `<author's short_base or PUBLIC_BASE_URL>/c/<code>`,
+  via `shortUrl()` and one per-request authors map (`loadBases` in the handler args).
 
 ## Conventions
 

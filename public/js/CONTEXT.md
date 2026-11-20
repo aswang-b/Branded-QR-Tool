@@ -33,7 +33,7 @@ ignored, and a new job supersedes the running one.
 | `index.html` | `app.js` | `qr.create` / `qr.update` (Replace), `qr.read` (`?edit=`), `link.create` (Shorten), `author.read` (suggestions, admin) |
 | `saved.html` | `saved.js` | `qr.read`, `qr.delete`, `qr.read {format:'svg'}` via `apiText`; Edit opens `index.html?edit=` |
 | `links.html` | `links.js` | `link.*`, `author.read` (suggestions) |
-| `authors.html` | `authors.js` | `author.*` (admin only) |
+| `authors.html` | `authors.js` | `author.*` (admin only), incl. each author's short address (`short_base`) |
 | `api.html` | `api.js` | `spec.read`, rendered with `textContent` only |
 
 ## Generator URL parameters (for other projects)

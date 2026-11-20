@@ -145,10 +145,10 @@ image is a `read` with `"format": "svg"`. Every call needs `Authorization: Beare
 | `qr.read` | `author?`, `link?`, `limit?`, `offset?` | `{designs: […]}` (no SVGs), newest first | admin, author* |
 | `qr.update` | `id`, `name?`, `details?`, `text` + `svg`?, `meta?`, `image?`, `new_author?` | the code | admin, author* |
 | `qr.delete` | `id` | `{deleted}` | admin, author* |
-| `author.create` | `name`, `adopt_existing?` | the author with their token (201) | admin |
-| `author.read` | `name` | one author, with token | admin |
+| `author.create` | `name`, `adopt_existing?`, `short_base?` | the author with their token (201) | admin |
+| `author.read` | `name` | one author, with token and `short_base` | admin |
 | `author.read` | `include_tokens?` | `{authors: […]}` (tokens only when asked) | admin |
-| `author.update` | `name`, `new_name?`, `rotate_token?`, `adopt_existing?` | the author | admin |
+| `author.update` | `name`, `new_name?`, `rotate_token?`, `adopt_existing?`, `short_base?` | the author (409 if `short_base` is another author's) | admin |
 | `author.delete` | `name` | `{deleted}` | admin |
 | `ticket.create` | `links`, `parent`, `from?`, `name?`, `settings?`, `replace?`, `author?` (admin) | `{url, …}`: a short-lived `/embed` ticket (201) | admin, author |
 | `ticket.read` | | what the calling ticket covers (used by `/embed`; 400 without a ticket) | ticket |
@@ -175,11 +175,12 @@ when you signed in (the server never sends the secret). Lost it? Set a new one w
 Errors are `{"error": "…"}` with status 400 (bad params), 401 (missing, wrong or revoked token), 403
 (the token can't do that), 404 (unknown method, or nothing with that id/code/name), 405 (wrong HTTP
 verb), 409 (`link.update` with an `if_url` that no longer matches; author name taken, or already on
-codes/links without `adopt_existing`), or 503
+codes/links without `adopt_existing`; `short_base` already another author's), or 503
 (`ADMIN_TOKEN` not configured: the API fails closed). `image` is the source logo as a PNG data URL (at
 most 300 kB), kept so the editor can regenerate the code. SVGs must match what the generator writes
 (only `svg`, `g`, `rect`, `circle` and `path` with plain shape and colour attributes); anything else is
-rejected. Only `http(s)` destinations are accepted, and never one of our own short links. Author tokens
+rejected. Only `http(s)` destinations are accepted, and never one of our own short links (on this site or
+any author's `short_base`). Author tokens
 record when they were last used (at most hourly). Keep tokens in server-side secrets, never in browser
 code.
 
@@ -244,6 +245,29 @@ that was already generated). Other projects use them through the API with their 
   `if_url` is optional: the update only happens if the link still points there, otherwise 409 with
   the link as it is now (`updated_at` says when it last changed).
 
+### Short links on your own site
+
+By default a code prints this site's address (`https://qr.dancewithb.fun/c/<code>`). An author's
+codes can print their own site's address instead, e.g. `https://dancewithb.fun/c/<code>` (on Android
+that opens the author's installed app). It is per author, and only the admin sets it:
+`author.update {name, short_base: "https://dancewithb.fun"}` (or the **Short address** field on the
+Authors tab). It is an origin only: https, no path, query, port or `#`, and one author per address.
+`""` or `null` goes back to this site's address. From then on that author's `link.*` results and
+their designs' `link.short` carry it, so new codes (generator, batch, embed) encode it.
+
+**Set it only once the site serves the codes.** Its server answers `/c/<code>` by asking this Worker:
+
+```
+GET (or HEAD) https://qr.dancewithb.fun/c/<code>     redirect: manual
+X-Short-Link-Host: dancewithb.fun                    (the site's own host)
+```
+
+and passing on the 302 `Location` (a 404 means "not active"). `GET` counts the scan, `HEAD` doesn't.
+With that header the Worker redirects only links whose author's `short_base` has that host; any
+other code answers 404 and isn't counted, so the site can never redirect to another author's links.
+Without the header nothing changes: codes printed with this site's address keep working for every
+author. Codes printed with an old `short_base` stop working when it is changed or cleared.
+
 ## Short links (redirect Worker)
 
 Printed QR codes should not contain the real destination: a long URL makes a denser, harder-to-scan
@@ -255,6 +279,7 @@ Worker redirects (HTTP 302) to wherever that code currently points.
 - **Managing links:** open `/links.html`, enter the admin or an author token, create links, change a destination
   later, delete (admin only), and see scan counts. "QR" opens the maker with the short URL filled in.
 - **API:** `link.create`, `link.read`, `link.update`, `link.delete` (see *API*).
+- **On the author's own site:** see *Short links on your own site*.
 - **Storage** is D1, created automatically on first use. Each scan costs one read and one batched
   write (the total, plus a 15-minute counter for per-day stats in any time zone), sent after the
   redirect; about one scan in 200 also deletes that link's counters older than 400 days. The free plan

@@ -104,6 +104,7 @@ h2 { margin: 0 0 12px; font-size: 1.05rem; }
 code { background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; font-size: .9em; }
 .row.between { justify-content: space-between; }
 .table-wrap { overflow-x: auto; }
+.short-base input { min-width: 14em; padding: 5px 8px; font-size: .85rem; }
 table { width: 100%; border-collapse: collapse; font-size: .9rem; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 td.num { font-variant-numeric: tabular-nums; }

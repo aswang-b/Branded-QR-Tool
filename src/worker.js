@@ -1,6 +1,9 @@
 // Short-link redirect Worker and API.
 //
-//   GET /c/<code>           302 to the stored destination (public)
+//   GET /c/<code>           302 to the stored destination (public). With
+//                           X-Short-Link-Host: <host> (an author's own site
+//                           serving the code), only for links whose author's
+//                           short_base has that host; others 404, uncounted
 //   GET /q/<id>.svg?sig=…   a saved code's SVG, for <img> tags elsewhere: the
 //                           signed svg_url from qr.read (no token needed)
 //
@@ -29,10 +32,14 @@
 //     author or delete links. A design it saves is only tied to a short link
 //     (link_id) when that link is its own, so a design can't reveal another
 //     author's destination.
-//   author.create {name, adopt_existing?} -> the author with a new token  admin
+//   author.create {name, adopt_existing?, short_base?} -> the author with a new token
+//                                                                 admin
 //   author.read   {name} -> one author with token |
 //                 {include_tokens?} -> list                         admin
-//   author.update {name, new_name?, rotate_token?, adopt_existing?} admin
+//   author.update {name, new_name?, rotate_token?, adopt_existing?, short_base?}
+//                                                                 admin
+//                 short_base: origin of the author's own site that serves their
+//                 /c/ codes; their links' "short" URLs use it ("" or null clears)
 //   author.delete {name}                                          admin
 //   spec.read    {} -> this API's specification (see spec.js); authors
 //                get the part their token can use                  admin, author
@@ -232,11 +239,42 @@ class HttpError extends Error {
   }
 }
 
-/** Hosts our short links are served from: this request's, plus PUBLIC_BASE_URL's. */
-function shortLinkHosts(request, env) {
+/** Hosts this Worker serves short links from: this request's, plus PUBLIC_BASE_URL's. */
+function baseHosts(request, env) {
   const hosts = new Set([new URL(request.url).host]);
   if (env.PUBLIC_BASE_URL) { try { hosts.add(new URL(env.PUBLIC_BASE_URL).host); } catch { /* ignore */ } }
   return hosts;
+}
+
+/**
+ * Every host our short links are served from: this Worker's, plus each
+ * author's own site (short_base), so no destination can loop back to one.
+ * @param {Map<string, string>} bases author name -> short_base (from api()'s `loadBases`)
+ */
+function shortLinkHosts(request, env, bases) {
+  const hosts = baseHosts(request, env);
+  for (const origin of bases.values()) hosts.add(new URL(origin).host);
+  return hosts;
+}
+
+/**
+ * An author's own short-link address (authors.short_base): the origin of a site
+ * that serves /c/<code> by asking this Worker with X-Short-Link-Host. Stored
+ * as "https://host": no path, query, fragment, port or trailing slash.
+ * @returns {string|null|undefined} undefined = not sent, null = clear it
+ */
+function parseShortBase(value) {
+  if (value === undefined) return undefined;
+  if (value === null || (typeof value === 'string' && !value.trim())) return null;
+  const bad = () => new HttpError(400, '"short_base" must be a site\'s address only, like https://dancewithb.fun (https, no path, query, port or #), or "" to use this site\'s');
+  if (typeof value !== 'string' || value.length > MAX_URL_LENGTH) throw bad();
+  const raw = value.trim();
+  // Checked on the raw text too: URL() quietly drops an empty "?" or "#".
+  if (!/^https:\/\/[^/?#\\@\s]+\/?$/i.test(raw)) throw bad();
+  let u;
+  try { u = new URL(raw); } catch { throw bad(); }
+  if (u.protocol !== 'https:' || u.port || u.username || u.password || !u.hostname) throw bad();
+  return `https://${u.hostname}`;
 }
 
 function parseDestination(value, hosts) {
@@ -329,13 +367,13 @@ function parseMeta(value) {
   return v;
 }
 
-/** If the encoded text is one of our short links (fragment allowed), its id. */
-function linkIdFor(text, request, env) {
+/** If the encoded text looks like a short link (fragment allowed): its host and link id. */
+function shortLinkIn(text) {
   let u;
   try { u = new URL(text); } catch { return null; }
-  const hosts = shortLinkHosts(request, env);
   const m = /^\/c\/([A-Za-z0-9]+)\/?$/.exec(u.pathname);
-  return m && hosts.has(u.host) ? decodeCode(m[1].toLowerCase()) : null;
+  const id = m ? decodeCode(m[1].toLowerCase()) : null;
+  return id === null ? null : { host: u.host, id };
 }
 
 // ---------------------------------------------------------------- storage
@@ -433,6 +471,10 @@ function ensureSchema(db) {
     // whether the ticket remakes links that already have a code.
     .then(() => addColumn(db, 'tickets', "settings TEXT NOT NULL DEFAULT '{}'"))
     .then(() => addColumn(db, 'tickets', 'replace_after INTEGER'))
+    // An author's own short-link address (parseShortBase), set by the admin.
+    // One author per address, so a site only ever serves its own author's links.
+    .then(() => addColumn(db, 'authors', 'short_base TEXT'))
+    .then(() => db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS authors_short_base ON authors (short_base) WHERE short_base IS NOT NULL').run())
     .catch((e) => {
       schemaReady = null;
       throw e;
@@ -450,11 +492,27 @@ function publicBase(request, env) {
   return (env.PUBLIC_BASE_URL || new URL(request.url).origin).replace(/\/+$/, '');
 }
 
-function present(row, base) {
+/**
+ * Per request: each author's short_base, read at most once and only when a
+ * handler needs it (one small query instead of a lookup per row).
+ * @returns {() => Promise<Map<string, string>>} author name -> short_base
+ */
+function authorBases(env) {
+  let loaded = null;
+  return () => (loaded ??= env.DB.prepare('SELECT name, short_base FROM authors WHERE short_base IS NOT NULL').all()
+    .then(({ results }) => new Map(results.map((r) => [r.name, r.short_base]))));
+}
+
+const NO_BASES = new Map();
+
+/** The URL a code prints for a link: on its author's own site when they have one, else this Worker's. */
+const shortUrl = (base, bases, author, id) => `${(author && bases.get(author)) || base}/c/${encodeId(id)}`;
+
+function present(row, base, bases = NO_BASES) {
   const code = encodeId(row.id);
   return {
     code,
-    short: `${base}/c/${code}`,
+    short: shortUrl(base, bases, row.author, row.id),
     url: row.url,
     label: row.label,
     author: row.author ?? '',
@@ -466,7 +524,7 @@ function present(row, base) {
   };
 }
 
-function presentDesign(row, base, { withSvg = false, svgUrl = null, who = null } = {}) {
+function presentDesign(row, base, { withSvg = false, svgUrl = null, who = null, bases = NO_BASES } = {}) {
   // An author only sees the destinations of their own links.
   const linkUrl = who?.role === 'author' && row.link_author !== who.author ? null : row.link_url ?? null;
   let meta = {};
@@ -477,7 +535,7 @@ function presentDesign(row, base, { withSvg = false, svgUrl = null, who = null }
     details: row.details,
     author: row.author ?? '',
     text: row.text,
-    link: row.link_id ? { code: encodeId(row.link_id), short: `${base}/c/${encodeId(row.link_id)}`, url: linkUrl } : null,
+    link: row.link_id ? { code: encodeId(row.link_id), short: shortUrl(base, bases, row.link_author, row.link_id), url: linkUrl } : null,
     meta,
     created_at: row.created_at,
     svg_url: svgUrl,
@@ -493,8 +551,16 @@ async function redirect(request, env, ctx, rawCode) {
   const id = decodeCode(rawCode.toLowerCase());
   if (id === null) return notFound();
   await ensureSchema(env.DB);
-  const row = await env.DB.prepare('SELECT url FROM links WHERE id = ?').bind(id).first();
+  // The author's short_base comes in the same query, so this stays one round trip.
+  const row = await env.DB.prepare("SELECT l.url, a.short_base FROM links l LEFT JOIN authors a ON a.name = l.author AND l.author != '' WHERE l.id = ?")
+    .bind(id).first();
   if (!row) return notFound();
+  // An author's own site serves our codes at its /c/ by asking here with
+  // X-Short-Link-Host: <its host>. It gets only links whose author has that
+  // short_base; anything else answers like an unknown code (and isn't
+  // counted), so no site can redirect to another author's links.
+  const via = request.headers.get('X-Short-Link-Host');
+  if (via !== null && !(row.short_base && new URL(row.short_base).hostname === via.trim().toLowerCase())) return notFound();
   if (request.method === 'GET') {
     const now = Math.floor(Date.now() / 1000);
     const slot = Math.floor(now / SLOT_SECONDS);
@@ -569,12 +635,24 @@ function presentAuthor(row, withToken = true) {
     ...(withToken ? { token: row.token } : {}),
     created_at: row.created_at,
     last_used: row.last_used ?? null,
+    short_base: row.short_base ?? null,
     codes: row.codes ?? 0,
     links: row.links ?? 0,
   };
 }
 
-const AUTHOR_SELECT = 'SELECT a.name, a.token, a.created_at, a.last_used, (SELECT COUNT(*) FROM designs d WHERE d.author = a.name) AS codes, (SELECT COUNT(*) FROM links l WHERE l.author = a.name) AS links FROM authors a';
+/** 409 unless no other author already prints their links on this address. */
+async function guardShortBase(env, shortBase, name) {
+  if (!shortBase) return;
+  const other = await env.DB.prepare('SELECT name FROM authors WHERE short_base = ? AND name != ?').bind(shortBase, name).first();
+  if (other) throw new HttpError(409, `${shortBase} is already "${other.name}"'s short address. One site serves one author's links.`);
+}
+
+/** The 409 for a UNIQUE failure on short_base (another author took it meanwhile), else null. */
+const shortBaseTaken = (e, shortBase) =>
+  /short_base/i.test(String(e?.message ?? e)) ? new HttpError(409, `${shortBase} was just made another author's short address. Choose another.`) : null;
+
+const AUTHOR_SELECT = 'SELECT a.name, a.token, a.created_at, a.last_used, a.short_base, (SELECT COUNT(*) FROM designs d WHERE d.author = a.name) AS codes, (SELECT COUNT(*) FROM links l WHERE l.author = a.name) AS links FROM authors a';
 const parseAuthorName = (v, field = 'name') => parseText(v, field, MAX_AUTHOR_LENGTH);
 
 /**
@@ -596,13 +674,17 @@ async function guardAdoption(env, name, p) {
 const authorCreate = async ({ env, p }) => {
   const name = parseAuthorName(p.name);
   if (await env.DB.prepare('SELECT 1 FROM authors WHERE name = ?').bind(name).first()) throw new HttpError(409, `An author named "${name}" already exists`);
+  const shortBase = parseShortBase(p.short_base) ?? null;
   await guardAdoption(env, name, p);
+  await guardShortBase(env, shortBase, name);
   const token = newAuthorToken();
   try {
-    await env.DB.prepare('INSERT INTO authors (name, token, token_hash, created_at) VALUES (?, ?, ?, ?)')
-      .bind(name, token, await sha256Hex(token), Math.floor(Date.now() / 1000))
+    await env.DB.prepare('INSERT INTO authors (name, token, token_hash, created_at, short_base) VALUES (?, ?, ?, ?, ?)')
+      .bind(name, token, await sha256Hex(token), Math.floor(Date.now() / 1000), shortBase)
       .run();
   } catch (e) {
+    const taken = shortBaseTaken(e, shortBase);
+    if (taken) throw taken;
     if (/UNIQUE/i.test(String(e?.message ?? e))) throw new HttpError(409, `An author named "${name}" already exists`);
     throw e;
   }
@@ -626,7 +708,9 @@ const authorUpdate = async ({ env, p }) => {
   if (!(await env.DB.prepare('SELECT 1 FROM authors WHERE name = ?').bind(name).first())) return json({ error: 'Not found' }, 404);
   const newName = p.new_name === undefined ? name : parseAuthorName(p.new_name, 'new_name');
   if (p.rotate_token !== undefined && typeof p.rotate_token !== 'boolean') throw new HttpError(400, '"rotate_token" must be true or false');
-  if (newName === name && !p.rotate_token) throw new HttpError(400, 'Nothing to update: send "new_name" and/or "rotate_token": true');
+  const shortBase = parseShortBase(p.short_base);
+  if (newName === name && !p.rotate_token && shortBase === undefined) throw new HttpError(400, 'Nothing to update: send "new_name", "rotate_token": true and/or "short_base"');
+  await guardShortBase(env, shortBase, name);
   if (newName !== name) {
     if (await env.DB.prepare('SELECT 1 FROM authors WHERE name = ?').bind(newName).first()) throw new HttpError(409, `An author named "${newName}" already exists`);
     await guardAdoption(env, newName, p);
@@ -639,8 +723,10 @@ const authorUpdate = async ({ env, p }) => {
     }
   }
   // A rotated or renamed author's live embed tickets stop working too, like
-  // their old token and image links.
-  const stmts = [env.DB.prepare('DELETE FROM tickets WHERE author = ?').bind(name)];
+  // their old token and image links. (A new short_base alone leaves them be.)
+  const stmts = [];
+  if (p.rotate_token || newName !== name) stmts.push(env.DB.prepare('DELETE FROM tickets WHERE author = ?').bind(name));
+  if (shortBase !== undefined) stmts.push(env.DB.prepare('UPDATE authors SET short_base = ? WHERE name = ?').bind(shortBase, name));
   if (p.rotate_token) {
     const token = newAuthorToken();
     stmts.push(env.DB.prepare('UPDATE authors SET token = ?, token_hash = ?, last_used = NULL WHERE name = ?').bind(token, await sha256Hex(token), name));
@@ -654,6 +740,8 @@ const authorUpdate = async ({ env, p }) => {
   try {
     await env.DB.batch(stmts);
   } catch (e) {
+    const taken = shortBaseTaken(e, shortBase);
+    if (taken) throw taken;
     // A name or key taken between the checks above and this batch.
     if (/UNIQUE/i.test(String(e?.message ?? e))) throw new HttpError(409, `Could not rename to "${newName}": that name or one of its link keys was just taken. Try again.`);
     throw e;
@@ -695,8 +783,9 @@ const parseBool = (v, field) => {
 const linkByKey = (env, author, key) =>
   env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE author = ? AND client_key = ?`).bind(author, key).first();
 
-const linkCreate = async ({ req, env, base, p, who }) => {
-  const url = parseDestination(p.url, shortLinkHosts(req, env));
+const linkCreate = async ({ req, env, base, loadBases, p, who }) => {
+  const bases = await loadBases();
+  const url = parseDestination(p.url, shortLinkHosts(req, env, bases));
   const label = parseLabel(p.label);
   const author = ownerFor(p, who);
   const key = parseKey(p.key);
@@ -704,9 +793,9 @@ const linkCreate = async ({ req, env, base, p, who }) => {
   // time. A create that asks for something else under the same key is refused,
   // so a caller never mistakes the old destination for the one it sent.
   const reuse = (existing) => {
-    if (existing.url === url && (p.label === undefined || existing.label === label)) return json(present(existing, base), 200);
+    if (existing.url === url && (p.label === undefined || existing.label === label)) return json(present(existing, base, bases), 200);
     const what = existing.url === url ? 'label' : 'url';
-    return json({ error: `A link with key "${key}" already exists with a different ${what}. Use link.update to change it.`, link: present(existing, base) }, 409);
+    return json({ error: `A link with key "${key}" already exists with a different ${what}. Use link.update to change it.`, link: present(existing, base, bases) }, 409);
   };
   if (key) {
     const existing = await linkByKey(env, author, key);
@@ -717,7 +806,7 @@ const linkCreate = async ({ req, env, base, p, who }) => {
     const row = await env.DB.prepare(`INSERT INTO links (url, label, author, client_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING ${LINK_COLUMNS}`)
       .bind(url, label, author, key, now, now)
       .first();
-    return json(present(row, base), 201);
+    return json(present(row, base, bases), 201);
   } catch (e) {
     // Two creates with the same key at once: the loser returns the winner's link.
     if (key && /UNIQUE/i.test(String(e?.message ?? e))) {
@@ -763,9 +852,10 @@ async function linkStats(env, id, p) {
 }
 
 // Links belong to an author like designs do: an author token only reaches its own.
-const linkRead = async ({ env, base, p, who }) => {
+const linkRead = async ({ env, base, loadBases, p, who }) => {
   const author = authorScope(p, who);
   const [scope, scopeArgs] = authorWhere(author);
+  const bases = await loadBases();
   if (p.code !== undefined || p.key !== undefined) {
     if (p.code !== undefined && p.key !== undefined) throw new HttpError(400, 'Send "code" or "key", not both');
     const withStats = parseBool(p.stats, 'stats');
@@ -774,22 +864,23 @@ const linkRead = async ({ env, base, p, who }) => {
       ? await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE id = ?${scope}`).bind(parseLinkCode(p.code), ...scopeArgs).first()
       : await linkByKey(env, author ?? '', parseKey(p.key));
     if (!row) return json({ error: 'Not found' }, 404);
-    return json(withStats ? { ...present(row, base), stats: await linkStats(env, row.id, p) } : present(row, base));
+    return json(withStats ? { ...present(row, base, bases), stats: await linkStats(env, row.id, p) } : present(row, base, bases));
   }
   if (p.stats !== undefined) throw new HttpError(400, '"stats" needs a "code" or "key"');
   const { limit, offset } = parsePage(p);
   const { results } = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE 1 = 1${scope} ORDER BY id DESC LIMIT ? OFFSET ?`)
     .bind(...scopeArgs, limit, offset)
     .all();
-  return json({ links: results.map((r) => present(r, base)) });
+  return json({ links: results.map((r) => present(r, base, bases)) });
 };
 
-const linkUpdate = async ({ req, env, base, p, who }) => {
+const linkUpdate = async ({ req, env, base, loadBases, p, who }) => {
   const [scope, scopeArgs] = authorWhere(authorScope(p, who));
+  const bases = await loadBases();
   const id = parseLinkCode(p.code);
   const sets = [];
   const args = [];
-  if (p.url !== undefined) { sets.push('url = ?'); args.push(parseDestination(p.url, shortLinkHosts(req, env))); }
+  if (p.url !== undefined) { sets.push('url = ?'); args.push(parseDestination(p.url, shortLinkHosts(req, env, bases))); }
   if (p.label !== undefined) { sets.push('label = ?'); args.push(parseLabel(p.label)); }
   if (p.new_author !== undefined) {
     if (who.role === 'author') throw new HttpError(403, 'An author token cannot change a link\'s author');
@@ -807,10 +898,10 @@ const linkUpdate = async ({ req, env, base, p, who }) => {
   }
   const row = await env.DB.prepare(`UPDATE links SET ${sets.join(', ')} WHERE id = ?${scope}${guard[0]} RETURNING ${LINK_COLUMNS}`)
     .bind(...args, id, ...scopeArgs, ...guard[1]).first();
-  if (row) return json(present(row, base));
+  if (row) return json(present(row, base, bases));
   if (guard[0]) {
     const current = await env.DB.prepare(`SELECT ${LINK_COLUMNS} FROM links WHERE id = ?${scope}`).bind(id, ...scopeArgs).first();
-    if (current) return json({ error: 'The link no longer points at if_url: someone changed it. Nothing was updated.', link: present(current, base) }, 409);
+    if (current) return json({ error: 'The link no longer points at if_url: someone changed it. Nothing was updated.', link: present(current, base, bases) }, 409);
   }
   return json({ error: 'Not found' }, 404);
 };
@@ -847,14 +938,21 @@ const svgUrlFor = async (env, base, row) => `${base}/q/${row.id}.svg?sig=${await
 const designOut = async (env, base, row, opts = {}) => presentDesign(row, base, { ...opts, svgUrl: await svgUrlFor(env, base, row) });
 
 /**
- * The short link a design's text opens, if any. For an author token, only one
- * of its own links: tying a design to another author's link would show that
- * link's destination in the reply.
+ * The short link a design's text opens, if any: a /c/ link on this Worker's
+ * hosts, or on the short_base of that link's own author (the only site that
+ * serves it, see redirect()). For an author token, only one of its own links:
+ * tying a design to another author's link would show that link's destination
+ * in the reply.
  */
 async function designLinkId(env, text, req, who) {
-  const id = linkIdFor(text, req, env);
-  if (id === null || who.role !== 'author') return id;
-  return (await env.DB.prepare('SELECT 1 FROM links WHERE id = ? AND author = ?').bind(id, who.author).first()) ? id : null;
+  const found = shortLinkIn(text);
+  if (!found) return null;
+  const ours = baseHosts(req, env).has(found.host);
+  if (ours && who.role !== 'author') return found.id;
+  const row = await env.DB.prepare("SELECT l.author, a.short_base FROM links l LEFT JOIN authors a ON a.name = l.author AND l.author != '' WHERE l.id = ?")
+    .bind(found.id).first();
+  if (!row || (who.role === 'author' && row.author !== who.author)) return null;
+  return ours || (row.short_base && new URL(row.short_base).host === found.host) ? found.id : null;
 }
 
 async function signedImage(request, env, rawId, url) {
@@ -877,7 +975,7 @@ const SVG_HEADERS = {
   'Cross-Origin-Resource-Policy': 'cross-origin',
 };
 
-const qrCreate = async ({ req, env, base, p, who }) => {
+const qrCreate = async ({ req, env, base, loadBases, p, who }) => {
   const text = parseText(p.text, 'text', MAX_TEXT_LENGTH);
   const author = ownerFor(p, who);
   const linkId = await designLinkId(env, text, req, who);
@@ -907,18 +1005,18 @@ const qrCreate = async ({ req, env, base, p, who }) => {
     const { results } = await env.DB.prepare('DELETE FROM designs WHERE link_id = ? AND author = ? AND id != ? RETURNING id').bind(linkId, author, row.id).all();
     replaced = results.map((r) => r.id).sort((a, b) => a - b);
   }
-  const out = await designOut(env, base, await fetchDesign(env.DB, row.id, null), { who });
+  const out = await designOut(env, base, await fetchDesign(env.DB, row.id, null), { who, bases: await loadBases() });
   return json(replaced ? { ...out, replaced } : out, 201);
 };
 
-const qrRead = async ({ env, base, p, who }) => {
+const qrRead = async ({ env, base, loadBases, p, who }) => {
   const author = authorScope(p, who);
   if (p.id !== undefined) {
     const format = p.format ?? 'json';
     if (format !== 'json' && format !== 'svg') throw new HttpError(400, '"format" must be "json" or "svg"');
     const row = await fetchDesign(env.DB, parseDesignId(p.id), author, ', d.svg, d.image');
     if (!row) return json({ error: 'Not found' }, 404);
-    if (format === 'json') return json(await designOut(env, base, row, { withSvg: true, who }));
+    if (format === 'json') return json(await designOut(env, base, row, { withSvg: true, who, bases: await loadBases() }));
     // The raw image, for another project's server to inline or serve itself.
     return new Response(row.svg, { headers: { ...SVG_HEADERS, 'Cache-Control': 'private, max-age=300' } });
   }
@@ -934,10 +1032,11 @@ const qrRead = async ({ env, base, p, who }) => {
   const { results } = await env.DB.prepare(`SELECT ${DESIGN_COLUMNS} FROM ${DESIGN_FROM}${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY d.id DESC LIMIT ? OFFSET ?`)
     .bind(...args, limit, offset)
     .all();
-  return json({ designs: await Promise.all(results.map((r) => designOut(env, base, r, { who }))) });
+  const bases = await loadBases();
+  return json({ designs: await Promise.all(results.map((r) => designOut(env, base, r, { who, bases }))) });
 };
 
-const qrUpdate = async ({ req, env, base, p, who }) => {
+const qrUpdate = async ({ req, env, base, loadBases, p, who }) => {
   const author = authorScope(p, who);
   const id = parseDesignId(p.id);
   const sets = [];
@@ -962,7 +1061,7 @@ const qrUpdate = async ({ req, env, base, p, who }) => {
   const scope = author === null ? ['', []] : [' AND author = ?', [author]];
   const res = await env.DB.prepare(`UPDATE designs SET ${sets.join(', ')} WHERE id = ?${scope[0]}`).bind(...args, id, ...scope[1]).run();
   if (!res.meta?.changes) return json({ error: 'Not found' }, 404);
-  return json(await designOut(env, base, await fetchDesign(env.DB, id, null), { who }));
+  return json(await designOut(env, base, await fetchDesign(env.DB, id, null), { who, bases: await loadBases() }));
 };
 
 const qrDelete = async ({ env, p, who }) => {
@@ -1094,7 +1193,7 @@ async function checkTicket(name, p, who, req, env) {
   if (name === 'link.read' && (p.key !== undefined || !covered(p.code))) deny();
   if (name === 'qr.read' && (p.id !== undefined ? !(t.from && String(p.id).trim() === String(t.from)) : !covered(p.link))) deny();
   if (name === 'qr.create') {
-    const id = typeof p.text === 'string' ? linkIdFor(p.text.trim(), req, env) : null;
+    const id = typeof p.text === 'string' ? await designLinkId(env, p.text.trim(), req, who) : null;
     if (id === null || !t.links.includes(encodeId(id))) deny();
     // Early, friendly answer; qrCreate's INSERT enforces it for simultaneous saves.
     const [since, sinceArgs] = t.replace ? [' AND id > ?', [t.replaceAfter]] : ['', []];
@@ -1151,7 +1250,7 @@ async function api(request, env, url, ctx) {
     : await readJson(request, method.big ? MAX_DESIGN_BODY_BYTES : MAX_BODY_BYTES);
   await ensureSchema(env.DB);
   if (who.ticket) await checkTicket(name, p, who, request, env);
-  return method.run({ req: request, env, url, base: publicBase(request, env), p, who });
+  return method.run({ req: request, env, url, base: publicBase(request, env), loadBases: authorBases(env), p, who });
 }
 
 export default {

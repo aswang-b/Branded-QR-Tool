@@ -26,6 +26,7 @@ There are no Tier 3 (feature) folders: the code is two flat directories.
 | Scan-reliability scoring | `README.md` → *Testing scan reliability*; `verify.js` |
 | Short links and scan stats | `README.md` → *Short links*; `src/CONTEXT.md` → *Scans* |
 | Using codes from another project | `README.md` → *Using codes from other projects* |
+| Short links on an author's own site | `README.md` → *Short links on your own site*; `src/CONTEXT.md` → *Author short addresses* |
 | Deploying | `README.md` → *Deploy to Cloudflare*; `deploy.cmd` |
 | Known limits | `README.md` → *Limitations* |
 

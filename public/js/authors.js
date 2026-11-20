@@ -1,5 +1,6 @@
-// Authors page: create, view, copy, rotate and revoke author API tokens
-// (author.* methods, admin only), and view/copy this browser's admin token.
+// Authors page: create, view, copy, rotate and revoke author API tokens, set
+// an author's own short-link address (author.* methods, admin only), and
+// view/copy this browser's admin token.
 
 import { api, getToken, bindSignIn } from './auth.js';
 
@@ -31,6 +32,32 @@ async function copy(text, done) {
   }
 }
 
+/**
+ * The author's own short-link address (author.update {short_base}). Empty:
+ * their codes print this site's address.
+ */
+function shortBaseField(a) {
+  const input = el('input');
+  Object.assign(input, { type: 'text', value: a.short_base || '', placeholder: 'this site', spellcheck: false, autocomplete: 'off', maxLength: 200 });
+  input.setAttribute('aria-label', `Short address for ${a.name}`);
+  const save = button('Save', async () => {
+    const next = input.value.trim().replace(/\/+$/, '');
+    const old = a.short_base || '';
+    if (next.toLowerCase() === old) return setMsg(`${a.name}'s short address is unchanged.`);
+    const warn = old ? `\n\nCodes already printed with ${old}/c/… stop working.` : '';
+    const ask = next
+      ? `Print ${a.name}'s codes as ${next}/c/<code>?\n\nThat site must already serve /c/<code> by asking this site with the X-Short-Link-Host header.${warn}`
+      : `Print ${a.name}'s codes with this site's address again?${warn}`;
+    if (!confirm(ask)) return;
+    const saved = await api('author.update', { name: a.name, short_base: next });
+    await load(saved.short_base ? `${a.name}'s codes now print ${saved.short_base}/c/<code>.` : `${a.name}'s codes now print this site's address.`);
+  });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save.click(); });
+  const wrap = el('div', 'row nowrap');
+  wrap.append(input, save);
+  return wrap;
+}
+
 function render(authors) {
   const rows = $('rows');
   rows.replaceChildren();
@@ -47,6 +74,8 @@ function render(authors) {
     codes.href = `saved.html?author=${encodeURIComponent(a.name)}`;
     const codesCell = el('td');
     codesCell.append(codes, `, ${a.links} link${a.links === 1 ? '' : 's'}`);
+    const shortCell = el('td', 'short-base');
+    shortCell.append(shortBaseField(a));
     const actions = el('td', 'row');
     actions.append(
       button('Rotate', async () => {
@@ -73,7 +102,7 @@ Give them to ${next.trim()}?`)) throw e;
         await load(`Revoked ${a.name}.`);
       }),
     );
-    tr.append(el('td', null, a.name), tokenCell, codesCell, el('td', null, when(a.last_used)), actions);
+    tr.append(el('td', null, a.name), tokenCell, codesCell, shortCell, el('td', null, when(a.last_used)), actions);
     rows.append(tr);
   }
   $('table').hidden = !authors.length;
